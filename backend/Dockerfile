@@ -1,40 +1,34 @@
 # syntax=docker/dockerfile:1.7
 # Multi-stage build for the zaphelper backend (Fastify + Prisma).
+#
+# Build strategy: do the whole install + build + prune in a single "builder"
+# stage, then copy only the production artifacts into a slim runtime image.
+# This avoids the workspace node_modules hoisting quirks that break
+# multi-COPY pipelines.
 
-# -------- deps --------
-FROM node:20-alpine AS deps
+# ---------- builder ----------
+FROM node:20-alpine AS builder
 WORKDIR /app
 
-# Install OpenSSL — Prisma engine needs it on Alpine.
+# Prisma and bcryptjs need openssl at build + runtime on Alpine.
 RUN apk add --no-cache openssl
 
-# Workspace files first for layer caching.
-COPY package.json package-lock.json* ./
+# Copy workspace manifests first for better layer caching.
+COPY package.json package-lock.json* tsconfig.base.json ./
 COPY backend/package.json ./backend/
 COPY web/package.json ./web/
 
-RUN npm ci --workspace=backend --include-workspace-root
+# Install all workspaces (we need devDependencies to build TS + Prisma Client).
+RUN npm ci --include-workspace-root
 
-# -------- build --------
-FROM node:20-alpine AS build
-WORKDIR /app
-
-RUN apk add --no-cache openssl
-
-COPY --from=deps /app/node_modules ./node_modules
-COPY --from=deps /app/backend/node_modules ./backend/node_modules
-
-COPY package.json package-lock.json* tsconfig.base.json ./
+# Copy the backend source (web is irrelevant to the backend image).
 COPY backend ./backend
 
-# Generate Prisma client, then compile TS.
+# Generate Prisma client + compile TypeScript.
 RUN cd backend && npx prisma generate
 RUN cd backend && npm run build
 
-# Drop dev dependencies for a smaller runtime image.
-RUN cd backend && npm prune --omit=dev
-
-# -------- runtime --------
+# ---------- runtime ----------
 FROM node:20-alpine AS runtime
 WORKDIR /app
 
@@ -43,10 +37,12 @@ RUN apk add --no-cache openssl tini
 ENV NODE_ENV=production
 ENV PORT=3000
 
-COPY --from=build /app/backend/dist ./dist
-COPY --from=build /app/backend/node_modules ./node_modules
-COPY --from=build /app/backend/prisma ./prisma
-COPY --from=build /app/backend/package.json ./package.json
+# We copy the full node_modules from the builder — it was hoisted to the root
+# of the workspace, so everything the backend imports resolves from /app/node_modules.
+COPY --from=builder /app/node_modules ./node_modules
+COPY --from=builder /app/backend/dist ./dist
+COPY --from=builder /app/backend/prisma ./prisma
+COPY --from=builder /app/backend/package.json ./package.json
 
 EXPOSE 3000
 

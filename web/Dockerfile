@@ -11,13 +11,13 @@
 FROM node:20-alpine AS build
 WORKDIR /app
 
-COPY package.json package-lock.json* ./
+COPY package.json package-lock.json* tsconfig.base.json ./
 COPY backend/package.json ./backend/
 COPY web/package.json ./web/
 
-RUN npm ci --workspace=web --include-workspace-root
+# Install all workspaces — simpler and avoids lockfile-with-workspace edge cases.
+RUN npm ci --include-workspace-root
 
-COPY tsconfig.base.json ./
 COPY web ./web
 
 RUN cd web && npm run build
