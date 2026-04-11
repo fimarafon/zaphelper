@@ -36,6 +36,9 @@ const configSchema = z.object({
     .string()
     .optional()
     .transform((v) => v !== "false"),
+
+  // Optional — required only for the sendVoice action. Get one at elevenlabs.io
+  ELEVENLABS_API_KEY: z.string().optional(),
 });
 
 export type AppConfig = z.infer<typeof configSchema>;

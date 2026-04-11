@@ -1,8 +1,14 @@
 import type { Command } from "./types.js";
+import type { ScheduledTaskService } from "../services/scheduled-task-service.js";
 import { auditCommand } from "./audit.command.js";
 import { helpCommand } from "./help.command.js";
 import { reminderCommand } from "./reminder.command.js";
 import { remindersCommand } from "./reminders.command.js";
+import { createScheduleCommand } from "./schedule.command.js";
+import {
+  createSchedulesCommand,
+  createUnscheduleCommand,
+} from "./schedules.command.js";
 import { statusCommand } from "./status.command.js";
 import { status7DaysCommand } from "./status-7days.command.js";
 import { statusMonthCommand } from "./status-month.command.js";
@@ -20,7 +26,12 @@ import { statusYesterdayCommand } from "./status-yesterday.command.js";
  *   2. Import it here and add it to `allCommands`.
  *   3. Restart the container.
  */
-export const allCommands: Command[] = [
+/**
+ * Commands that don't depend on runtime services. Dynamic commands (e.g.
+ * /schedule, which needs ScheduledTaskService) are added at registry
+ * construction time via the `extraCommands` constructor argument.
+ */
+export const staticCommands: Command[] = [
   // Status commands — shortcuts first, then the generic /status for specific dates/ranges.
   statusTodayCommand,
   statusYesterdayCommand,
@@ -37,10 +48,31 @@ export const allCommands: Command[] = [
   helpCommand,
 ];
 
+/** Legacy export for callers that don't inject services. */
+export const allCommands: Command[] = staticCommands;
+
+/**
+ * Factory that builds the full command list including commands that need
+ * runtime services injected (like ScheduledTaskService).
+ */
+export function buildCommandList(deps: {
+  taskService?: ScheduledTaskService;
+}): Command[] {
+  const list: Command[] = [...staticCommands];
+  if (deps.taskService) {
+    list.push(
+      createScheduleCommand(deps.taskService),
+      createSchedulesCommand(deps.taskService),
+      createUnscheduleCommand(deps.taskService),
+    );
+  }
+  return list;
+}
+
 export class CommandRegistry {
   private readonly commands = new Map<string, Command>();
 
-  constructor(commands: Command[] = allCommands) {
+  constructor(commands: Command[] = staticCommands) {
     for (const cmd of commands) {
       this.register(cmd);
     }

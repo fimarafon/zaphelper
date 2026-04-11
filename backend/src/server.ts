@@ -1,7 +1,8 @@
 import fastifyCookie from "@fastify/cookie";
 import fastifyCors from "@fastify/cors";
 import Fastify from "fastify";
-import { CommandRegistry } from "./commands/registry.js";
+import { ActionRegistry } from "./actions/registry.js";
+import { buildCommandList, CommandRegistry } from "./commands/registry.js";
 import { loadConfig } from "./config.js";
 import { EvolutionClient } from "./evolution/client.js";
 import { createLogger } from "./logger.js";
@@ -12,10 +13,13 @@ import { commandRoutes } from "./routes/commands.js";
 import { instanceRoutes } from "./routes/instance.js";
 import { messagesRoutes } from "./routes/messages.js";
 import { remindersRoutes } from "./routes/reminders.js";
+import { schedulesRoutes } from "./routes/schedules.js";
 import { webhookRoutes } from "./routes/webhook.js";
 import { CommandDispatcher } from "./services/command-dispatcher.js";
 import { MessageIngest } from "./services/message-ingest.js";
 import { Scheduler } from "./services/scheduler.js";
+import { ScheduledTaskRunner } from "./services/scheduled-task-runner.js";
+import { ScheduledTaskService } from "./services/scheduled-task-service.js";
 import { SelfIdentity } from "./services/self-identity.js";
 
 async function bootstrap() {
@@ -41,7 +45,23 @@ async function bootstrap() {
   );
 
   const scheduler = new Scheduler(prisma, evolution, selfIdentity, config, logger);
-  const registry = new CommandRegistry();
+
+  // Scheduled tasks (generic cron + actions, separate from Reminder)
+  const actionRegistry = new ActionRegistry();
+  const taskRunner = new ScheduledTaskRunner(
+    prisma,
+    evolution,
+    selfIdentity,
+    config,
+    actionRegistry,
+    logger,
+  );
+  const taskService = new ScheduledTaskService(prisma, taskRunner, actionRegistry);
+
+  // Command registry with both static and dynamic commands.
+  const commandList = buildCommandList({ taskService });
+  const registry = new CommandRegistry(commandList);
+
   const dispatcher = new CommandDispatcher(
     prisma,
     evolution,
@@ -51,11 +71,16 @@ async function bootstrap() {
     config,
     logger,
   );
+
+  // Wire the dispatcher back into the task runner so runCommand actions work.
+  taskRunner.runInlineCommand = (input: string) => dispatcher.runInline(input);
+
   const ingest = new MessageIngest(prisma, selfIdentity, logger);
 
   // --- Init async state before taking traffic ---
   await selfIdentity.init();
   await scheduler.start();
+  await taskRunner.start();
 
   // --- Fastify app ---
   // Pass a pino-shaped logger config instead of the logger instance — Fastify's
@@ -115,6 +140,7 @@ async function bootstrap() {
   await app.register(messagesRoutes, { prisma });
   await app.register(commandRoutes, { prisma, registry, dispatcher });
   await app.register(remindersRoutes, { prisma, scheduler });
+  await app.register(schedulesRoutes, { taskService, actionRegistry });
 
   app.setErrorHandler((err, _req, reply) => {
     const statusCode = (err as Error & { statusCode?: number }).statusCode ?? 500;
@@ -128,6 +154,7 @@ async function bootstrap() {
     try {
       await app.close();
       await scheduler.stop();
+      await taskRunner.stop();
       await prisma.$disconnect();
     } catch (err) {
       logger.error({ err }, "Error during shutdown");

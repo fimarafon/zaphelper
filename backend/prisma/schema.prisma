@@ -116,3 +116,33 @@ enum InstanceStatus {
   CONNECTED
   ERROR
 }
+
+// Generic scheduled task — runs an Action on a cron schedule or one-shot.
+// Designed to be extensible: actionType is a plain string keyed into the
+// ActionRegistry at runtime, and actionPayload is free-form JSON.
+model ScheduledTask {
+  id              String              @id @default(cuid())
+  name            String                                       // human name for /schedules listing
+  enabled         Boolean             @default(true)
+
+  // One of these two must be set:
+  cronExpression  String?                                      // e.g. "0 9 * * 1" (Mon 9am)
+  fireAt          DateTime?                                    // one-shot absolute time
+
+  // Action to run when the task fires.
+  actionType      String                                       // "sendText" | "runCommand" | "webhook" | "sendVoice"
+  actionPayload   Json                                         // arbitrary payload per action type
+
+  lastFiredAt     DateTime?
+  nextFireAt      DateTime?
+  lastError       String?
+  lastResult      String?                                      // truncated last action output
+  runCount        Int                 @default(0)
+  failureCount    Int                 @default(0)
+
+  createdAt       DateTime            @default(now())
+  updatedAt       DateTime            @updatedAt
+
+  @@index([enabled, nextFireAt])
+  @@index([enabled, fireAt])
+}

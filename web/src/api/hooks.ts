@@ -217,3 +217,96 @@ export function useCancelReminder() {
     },
   });
 }
+
+// ---- Schedules ----
+
+export interface ScheduledTask {
+  id: string;
+  name: string;
+  enabled: boolean;
+  cronExpression: string | null;
+  fireAt: string | null;
+  actionType: string;
+  actionPayload: Record<string, unknown>;
+  lastFiredAt: string | null;
+  nextFireAt: string | null;
+  lastError: string | null;
+  lastResult: string | null;
+  runCount: number;
+  failureCount: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ActionDescriptor {
+  type: string;
+  description: string;
+}
+
+export function useSchedules() {
+  return useQuery({
+    queryKey: ["schedules"],
+    queryFn: () => api.get<{ items: ScheduledTask[] }>("/api/schedules"),
+    refetchInterval: 30_000,
+  });
+}
+
+export function useScheduleActions() {
+  return useQuery({
+    queryKey: ["schedules", "actions"],
+    queryFn: () =>
+      api.get<{ actions: ActionDescriptor[] }>("/api/schedules/actions"),
+    staleTime: 5 * 60_000,
+  });
+}
+
+export function useCreateSchedule() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: {
+      name: string;
+      actionType: string;
+      actionPayload: Record<string, unknown>;
+      cronExpression?: string;
+      fireAt?: string;
+    }) => api.post<{ ok: true; task: ScheduledTask }>("/api/schedules", body),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["schedules"] });
+    },
+  });
+}
+
+export function useToggleSchedule() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, enabled }: { id: string; enabled: boolean }) =>
+      api.post<{ ok: true; task: ScheduledTask }>(
+        `/api/schedules/${id}/toggle`,
+        { enabled },
+      ),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["schedules"] });
+    },
+  });
+}
+
+export function useRunScheduleNow() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) =>
+      api.post<{ ok: true }>(`/api/schedules/${id}/run`),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["schedules"] });
+    },
+  });
+}
+
+export function useDeleteSchedule() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => api.del<{ ok: true }>(`/api/schedules/${id}`),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["schedules"] });
+    },
+  });
+}

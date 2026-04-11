@@ -7,6 +7,7 @@ const NAV = [
   { to: "/messages", label: "Mensagens" },
   { to: "/commands", label: "Comandos" },
   { to: "/reminders", label: "Lembretes" },
+  { to: "/schedules", label: "Schedules" },
 ];
 
 export function Layout() {

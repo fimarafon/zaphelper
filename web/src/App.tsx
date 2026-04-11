@@ -6,6 +6,7 @@ import { Dashboard } from "./pages/Dashboard";
 import { Login } from "./pages/Login";
 import { Messages } from "./pages/Messages";
 import { Reminders } from "./pages/Reminders";
+import { Schedules } from "./pages/Schedules";
 
 export function App() {
   const meQuery = useMe();
@@ -33,6 +34,7 @@ export function App() {
         <Route path="/messages" element={<Messages />} />
         <Route path="/commands" element={<Commands />} />
         <Route path="/reminders" element={<Reminders />} />
+        <Route path="/schedules" element={<Schedules />} />
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
