@@ -47,12 +47,18 @@ export class MessageIngest {
    * Evolution API's /chat/findMessages returns records with this shape:
    *   { id, key, pushName, messageType, message, messageTimestamp, instanceId, ... }
    *
-   * We adapt it to look like a webhook messages.upsert payload and reuse the
-   * same extraction logic.
+   * The `resolver` is optional — when provided, it resolves LIDs and phone
+   * numbers into real display names using maps built from group participants
+   * and contacts. This is critical for group messages where WhatsApp's multi-
+   * device protocol only gives us opaque `@lid` identifiers.
    */
   async ingestRaw(
     record: Record<string, unknown>,
-    chatNameMap: Map<string, string>,
+    resolver: {
+      chatNameMap: Map<string, string>;
+      lidToPhone: Map<string, string>;
+      phoneToName: Map<string, string>;
+    },
   ): Promise<{ saved: boolean; duplicate: boolean }> {
     const key = record.key as
       | { id?: string; fromMe?: boolean; remoteJid?: string; participant?: string }
@@ -72,11 +78,36 @@ export class MessageIngest {
     const isGroup = isGroupJid(key.remoteJid);
     const chatId = jidToChatId(key.remoteJid);
 
-    const senderJidRaw = isGroup ? key.participant : key.remoteJid;
-    const senderPhone = senderJidRaw ? jidToChatId(senderJidRaw) : null;
+    // Resolve sender. For groups, key.participant is usually an LID like
+    // "87909424230589@lid". We map LID -> phone -> display name.
+    let senderPhone: string | null = null;
+    let senderName: string | null = null;
 
-    // Chat name: groups have a subject in the chat record we looked up earlier.
-    const chatName = chatNameMap.get(key.remoteJid) ?? (record.pushName as string | undefined) ?? null;
+    const rawSenderJid = isGroup ? key.participant : key.remoteJid;
+    if (rawSenderJid) {
+      const resolvedPhoneJid = resolver.lidToPhone.get(rawSenderJid) ?? rawSenderJid;
+      senderPhone = jidToChatId(resolvedPhoneJid);
+
+      // Display name priority:
+      //   1. phoneNumber -> pushName from contacts (real name)
+      //   2. original record.pushName IF it's not just digits (unresolved LID)
+      //   3. null
+      const nameFromContacts = resolver.phoneToName.get(resolvedPhoneJid);
+      if (nameFromContacts) {
+        senderName = nameFromContacts;
+      } else {
+        const recordPushName = record.pushName as string | undefined;
+        if (recordPushName && !/^\d+$/.test(recordPushName)) {
+          senderName = recordPushName;
+        }
+      }
+    }
+
+    // Chat name: groups have a subject from fetchAllGroups; DMs fall back to pushName.
+    const chatName =
+      resolver.chatNameMap.get(key.remoteJid) ??
+      (record.pushName as string | undefined) ??
+      null;
 
     const { content, messageType } = extractContent(messageBody);
 
@@ -90,7 +121,7 @@ export class MessageIngest {
           chatId,
           chatName,
           senderPhone,
-          senderName: (record.pushName as string | undefined) ?? null,
+          senderName,
           content,
           rawMessage: record as unknown as Prisma.InputJsonValue,
           messageType,

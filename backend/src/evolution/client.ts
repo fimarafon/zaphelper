@@ -237,23 +237,64 @@ export class EvolutionClient {
   }
 
   /**
-   * Fetches all groups with their subjects — this is where group display names
-   * live. /chat/findChats doesn't carry the subject field.
+   * Fetches all groups with their subjects and optionally participants.
+   * When `withParticipants` is true, each participant includes both `id`
+   * (the WhatsApp LID like "87909424230589@lid") and `phoneNumber`
+   * (the real phone like "12543343617@s.whatsapp.net") so we can build
+   * an LID → phone number resolution map.
    */
-  async fetchAllGroups(): Promise<Array<{ id: string; subject: string }>> {
+  async fetchAllGroups(withParticipants = false): Promise<
+    Array<{
+      id: string;
+      subject: string;
+      participants?: Array<{ id: string; phoneNumber?: string; admin?: string | null }>;
+    }>
+  > {
     try {
       const res = await this.request<Array<Record<string, unknown>>>(
         "GET",
-        `/group/fetchAllGroups/${encodeURIComponent(this.instanceName)}?getParticipants=false`,
+        `/group/fetchAllGroups/${encodeURIComponent(this.instanceName)}?getParticipants=${withParticipants}`,
       );
       if (!Array.isArray(res)) return [];
       return res
         .filter((g): g is { id: string; subject: string } =>
           typeof g.id === "string" && typeof g.subject === "string",
         )
-        .map((g) => ({ id: g.id, subject: g.subject }));
+        .map((g) => ({
+          id: g.id,
+          subject: g.subject,
+          participants: (g as Record<string, unknown>).participants as
+            | Array<{ id: string; phoneNumber?: string; admin?: string | null }>
+            | undefined,
+        }));
     } catch (err) {
       this.logger.warn({ err }, "fetchAllGroups failed");
+      return [];
+    }
+  }
+
+  /**
+   * Fetches the contacts table from Evolution. Each contact has `remoteJid`
+   * (phone number) and `pushName` (resolved display name if known).
+   */
+  async fetchAllContacts(): Promise<
+    Array<{ remoteJid: string; pushName: string | null }>
+  > {
+    try {
+      const res = await this.request<Array<Record<string, unknown>>>(
+        "POST",
+        `/chat/findContacts/${encodeURIComponent(this.instanceName)}`,
+        { where: {} },
+      );
+      if (!Array.isArray(res)) return [];
+      return res
+        .filter((c) => typeof c.remoteJid === "string")
+        .map((c) => ({
+          remoteJid: c.remoteJid as string,
+          pushName: (c.pushName as string | undefined) ?? null,
+        }));
+    } catch (err) {
+      this.logger.warn({ err }, "fetchAllContacts failed");
       return [];
     }
   }

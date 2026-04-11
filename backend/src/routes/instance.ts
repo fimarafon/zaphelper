@@ -134,18 +134,43 @@ export const instanceRoutes: FastifyPluginAsync<InstanceRoutesDeps> = async (
       const maxPages = req.body?.maxPages ?? 1000;
       const started = Date.now();
 
-      // Step 1: build chat name map.
-      //   - /group/fetchAllGroups gives us group subjects (the display name)
-      //   - /chat/findChats gives us pushName for DMs
+      // ---- Step 1: build the resolution maps ----
+      //
+      //   chatNameMap:  remoteJid     -> display name (group subject or DM pushName)
+      //   lidToPhone:   "x@lid"       -> "y@s.whatsapp.net"  (from group participants)
+      //   phoneToName:  "y@s.whatsapp.net" -> pushName         (from contacts table)
       const chatNameMap = new Map<string, string>();
+      const lidToPhone = new Map<string, string>();
+      const phoneToName = new Map<string, string>();
+
       try {
-        const groups = await evolution.fetchAllGroups();
+        const groups = await evolution.fetchAllGroups(true);
         for (const g of groups) {
           chatNameMap.set(g.id, g.subject);
+          for (const p of g.participants ?? []) {
+            if (p.id && p.phoneNumber) {
+              lidToPhone.set(p.id, p.phoneNumber);
+            }
+          }
         }
-        fastify.log.info({ groups: groups.length }, "Backfill: loaded groups");
+        fastify.log.info(
+          { groups: groups.length, lidMappings: lidToPhone.size },
+          "Backfill: loaded groups + participants",
+        );
       } catch (err) {
         fastify.log.warn({ err }, "Backfill: could not load groups");
+      }
+
+      try {
+        const contacts = await evolution.fetchAllContacts();
+        for (const c of contacts) {
+          if (c.pushName && !/^\d+$/.test(c.pushName)) {
+            phoneToName.set(c.remoteJid, c.pushName);
+          }
+        }
+        fastify.log.info({ contactNames: phoneToName.size }, "Backfill: loaded contacts");
+      } catch (err) {
+        fastify.log.warn({ err }, "Backfill: could not load contacts");
       }
 
       try {
@@ -157,6 +182,7 @@ export const instanceRoutes: FastifyPluginAsync<InstanceRoutesDeps> = async (
             (c.name as string | undefined) ??
             null;
           if (remoteJid && name && !chatNameMap.has(remoteJid)) {
+            // DM chatName — only set if we don't already have a group subject.
             chatNameMap.set(remoteJid, name);
           }
         }
@@ -164,6 +190,8 @@ export const instanceRoutes: FastifyPluginAsync<InstanceRoutesDeps> = async (
       } catch (err) {
         fastify.log.warn({ err }, "Backfill: could not load chats");
       }
+
+      const resolver = { chatNameMap, lidToPhone, phoneToName };
 
       // Step 2: paginate through messages.
       let page = 1;
@@ -181,7 +209,7 @@ export const instanceRoutes: FastifyPluginAsync<InstanceRoutesDeps> = async (
 
           for (const record of result.records) {
             try {
-              const res = await ingest.ingestRaw(record, chatNameMap);
+              const res = await ingest.ingestRaw(record, resolver);
               if (res.saved) totalSaved += 1;
               else if (res.duplicate) totalDuplicate += 1;
               else totalSkipped += 1;
@@ -210,22 +238,61 @@ export const instanceRoutes: FastifyPluginAsync<InstanceRoutesDeps> = async (
         }
       }
 
-      // Step 3: retrofit chatName on any messages whose chatId matches a
-      // known name but have chatName null OR chatName equal to the bare chatId
-      // (from a previous backfill run that didn't have the name map yet).
-      let updated = 0;
+      // ---- Step 3: retrofit existing rows ----
+      //
+      // After the backfill re-ingests from Evolution, duplicate key errors
+      // mean we already have a row — but from a previous run that may have
+      // stored wrong chatName/senderName. Force-update rows by chatId.
+      //
+      // For chatName: any row in the same group gets the group subject.
+      // For senderName: for each LID -> phone -> name resolution, update
+      // every row whose senderPhone matches the LID digits.
+      let chatNameUpdated = 0;
       for (const [jid, name] of chatNameMap.entries()) {
         const chatId = jid.replace(/@.*$/, "");
         const res = await prisma.message.updateMany({
-          where: {
-            chatId,
-            OR: [{ chatName: null }, { chatName: chatId }],
-          },
+          where: { chatId, isGroup: true },
           data: { chatName: name },
         });
-        updated += res.count;
+        chatNameUpdated += res.count;
       }
-      fastify.log.info({ updated }, "Backfill: retrofitted chatName");
+
+      // Build a combined LID -> displayName map to retrofit senderName.
+      const lidToName = new Map<string, string>();
+      for (const [lidJid, phoneJid] of lidToPhone.entries()) {
+        const name = phoneToName.get(phoneJid);
+        if (name) lidToName.set(lidJid, name);
+      }
+
+      let senderNameUpdated = 0;
+      let senderPhoneUpdated = 0;
+      for (const [lidJid, displayName] of lidToName.entries()) {
+        const lidDigits = lidJid.replace(/@.*$/, "");
+        const realPhoneJid = lidToPhone.get(lidJid);
+        const realPhoneDigits = realPhoneJid?.replace(/@.*$/, "") ?? null;
+
+        // Update senderName on rows stored with the bare LID as senderPhone.
+        const resName = await prisma.message.updateMany({
+          where: { senderPhone: lidDigits },
+          data: { senderName: displayName },
+        });
+        senderNameUpdated += resName.count;
+
+        // Also replace the LID in senderPhone with the real phone number so
+        // the dashboard shows proper numbers instead of opaque LIDs.
+        if (realPhoneDigits) {
+          const resPhone = await prisma.message.updateMany({
+            where: { senderPhone: lidDigits },
+            data: { senderPhone: realPhoneDigits },
+          });
+          senderPhoneUpdated += resPhone.count;
+        }
+      }
+
+      fastify.log.info(
+        { chatNameUpdated, senderNameUpdated, senderPhoneUpdated },
+        "Backfill: retrofitted existing rows",
+      );
 
       return {
         ok: true,
@@ -235,6 +302,9 @@ export const instanceRoutes: FastifyPluginAsync<InstanceRoutesDeps> = async (
         saved: totalSaved,
         duplicate: totalDuplicate,
         skipped: totalSkipped,
+        groups: chatNameMap.size,
+        lidMappings: lidToPhone.size,
+        contactNames: phoneToName.size,
         error: lastError,
       };
     },
