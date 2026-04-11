@@ -391,7 +391,15 @@ export class MessageIngest {
         err instanceof Prisma.PrismaClientKnownRequestError &&
         err.code === "P2002"
       ) {
-        // Duplicate waMessageId — webhook retry. Normal.
+        // Duplicate waMessageId — the UNIQUE index on waMessageId is our
+        // idempotency key (industry-standard pattern: see docs/BEST-PRACTICES.md).
+        // Evolution fires fire-and-forget, so retries from Evolution shouldn't
+        // happen in practice, but IncrementalSync + backfill can re-ingest
+        // the same record. This path is expected and safe.
+        this.logger.debug(
+          { waMessageId: key.id, chatId },
+          "Dedupe: message already ingested (idempotent no-op)",
+        );
         return { saved: null, duplicate: true, isSelfCommand: false };
       }
       throw err;
