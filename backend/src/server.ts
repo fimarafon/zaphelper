@@ -16,6 +16,7 @@ import { remindersRoutes } from "./routes/reminders.js";
 import { schedulesRoutes } from "./routes/schedules.js";
 import { webhookRoutes } from "./routes/webhook.js";
 import { CommandDispatcher } from "./services/command-dispatcher.js";
+import { IncrementalSync } from "./services/incremental-sync.js";
 import { MessageIngest } from "./services/message-ingest.js";
 import { Scheduler } from "./services/scheduler.js";
 import { ScheduledTaskRunner } from "./services/scheduled-task-runner.js";
@@ -77,10 +78,21 @@ async function bootstrap() {
 
   const ingest = new MessageIngest(prisma, selfIdentity, logger);
 
+  // Incremental sync — safety net for the webhook. Pulls anything Evolution
+  // received but didn't deliver (e.g. during restarts / brief crashes).
+  const incrementalSync = new IncrementalSync(
+    prisma,
+    evolution,
+    ingest,
+    config,
+    logger,
+  );
+
   // --- Init async state before taking traffic ---
   await selfIdentity.init();
   await scheduler.start();
   await taskRunner.start();
+  await incrementalSync.start();
 
   // --- Fastify app ---
   // Pass a pino-shaped logger config instead of the logger instance — Fastify's
@@ -155,6 +167,7 @@ async function bootstrap() {
       await app.close();
       await scheduler.stop();
       await taskRunner.stop();
+      incrementalSync.stop();
       await prisma.$disconnect();
     } catch (err) {
       logger.error({ err }, "Error during shutdown");
