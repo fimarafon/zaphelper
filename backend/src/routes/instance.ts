@@ -3,8 +3,10 @@ import type { FastifyPluginAsync } from "fastify";
 import type { AppConfig } from "../config.js";
 import type { EvolutionClient } from "../evolution/client.js";
 import { requireAuth } from "../middleware/auth.js";
+import { parseLead } from "../services/lead-parser.js";
 import type { MessageIngest } from "../services/message-ingest.js";
 import type { SelfIdentity } from "../services/self-identity.js";
+import { parseStatusRange, startOfWeekMondayInTz } from "../utils/dates.js";
 
 export interface InstanceRoutesDeps {
   prisma: PrismaClient;
@@ -551,6 +553,77 @@ export const instanceRoutes: FastifyPluginAsync<InstanceRoutesDeps> = async (
         }));
 
       return { unresolved };
+    },
+  );
+
+  // Debug endpoint: returns ALL messages from the Be Home leads group in a
+  // given window along with their parseLead result. Used to audit which
+  // messages were counted as leads vs skipped.
+  fastify.get<{ Querystring: { range?: string } }>(
+    "/api/instance/audit-leads",
+    async (req, reply) => {
+      try {
+        requireAuth(req);
+      } catch {
+        return reply.code(401).send({ error: "Unauthorized" });
+      }
+
+      // Default to this week (Mon → now) if no range provided.
+      let start: Date;
+      let end: Date = new Date();
+      const rangeArg = req.query.range;
+      if (rangeArg) {
+        const parsed = parseStatusRange(rangeArg, config.TZ, new Date());
+        if (!parsed) {
+          return reply.code(400).send({ error: "Could not parse range" });
+        }
+        start = parsed.start;
+        end = parsed.end;
+      } else {
+        start = startOfWeekMondayInTz(new Date(), config.TZ);
+      }
+
+      const messages = await prisma.message.findMany({
+        where: {
+          isGroup: true,
+          chatName: { contains: config.BE_HOME_LEADS_GROUP_NAME, mode: "insensitive" },
+          timestamp: { gte: start, lte: end },
+          messageType: "TEXT",
+        },
+        orderBy: { timestamp: "asc" },
+      });
+
+      const parsed = [];
+      const skipped = [];
+      for (const m of messages) {
+        const result = parseLead(m.content);
+        const info = {
+          id: m.id,
+          timestamp: m.timestamp,
+          senderName: m.senderName,
+          content: m.content,
+          lineCount: m.content.split(/\r?\n/).filter((l) => l.trim()).length,
+        };
+        if (result) {
+          parsed.push({
+            ...info,
+            parsedName: result.name,
+            parsedPhone: result.phone,
+            parsedSource: result.source,
+            parsedScheduled: result.scheduledAt,
+          });
+        } else {
+          skipped.push(info);
+        }
+      }
+
+      return {
+        range: { start, end },
+        totalMessages: messages.length,
+        parsed: parsed.length,
+        skipped: skipped.length,
+        skippedMessages: skipped,
+      };
     },
   );
 
