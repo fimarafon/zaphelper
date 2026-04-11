@@ -1,4 +1,5 @@
 import type { Command } from "./types.js";
+import { auditCommand } from "./audit.command.js";
 import { helpCommand } from "./help.command.js";
 import { reminderCommand } from "./reminder.command.js";
 import { remindersCommand } from "./reminders.command.js";
@@ -27,6 +28,8 @@ export const allCommands: Command[] = [
   statusWeekCommand,
   statusMonthCommand,
   statusCommand,
+  // Audit (transparency into skipped messages)
+  auditCommand,
   // Reminders
   reminderCommand,
   remindersCommand,

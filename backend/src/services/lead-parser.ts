@@ -22,6 +22,21 @@ export interface ParsedLead {
   rawLines: string[];
 }
 
+/**
+ * Reason a message was NOT classified as a lead. Used for transparency
+ * reports so the user can audit what's being skipped.
+ */
+export type SkipReason =
+  | "too_short"        // 1 line only — chatter / coordination
+  | "no_signal"        // has lines but no name/phone/schedule — discussion
+  | "empty"            // empty or invalid content
+  | "parsed";          // (not skipped — used as the success tag in SkipResult)
+
+export interface LeadParseResult {
+  lead: ParsedLead | null;
+  skipReason: SkipReason;
+}
+
 const PHONE_RX = /(\+?\d[\d\s().-]{7,}\d)/;
 const KEY_VALUE_RX = /^([A-Za-z ]+):\s*(.+)$/;
 const DATE_RX = /(\d{4}[-/]\d{1,2}[-/]\d{1,2})[\sT]+(\d{1,2}:\d{2}(?:\s*[ap]m)?)/i;
@@ -203,13 +218,30 @@ export function detectSource(text: string): string | null {
 /**
  * Parses the text body of a single WhatsApp message into a ParsedLead, or
  * returns null if the message doesn't look like a lead (e.g. a random comment).
+ *
+ * For auditing, use `parseLeadWithReason()` which returns a tagged result.
  */
 export function parseLead(content: string): ParsedLead | null {
-  if (!content || typeof content !== "string") return null;
+  return parseLeadWithReason(content).lead;
+}
+
+/**
+ * Same as parseLead() but returns the reason a message was skipped,
+ * so callers can report transparency about what got filtered out.
+ */
+export function parseLeadWithReason(content: string): LeadParseResult {
+  if (!content || typeof content !== "string") {
+    return { lead: null, skipReason: "empty" };
+  }
 
   const rawLines = content.split(/\r?\n/).map((l) => l.trim());
   const lines = rawLines.filter(Boolean);
-  if (lines.length < 2) return null;
+  if (lines.length === 0) {
+    return { lead: null, skipReason: "empty" };
+  }
+  if (lines.length < 2) {
+    return { lead: null, skipReason: "too_short" };
+  }
 
   const lead: ParsedLead = {
     name: null,
@@ -328,9 +360,11 @@ export function parseLead(content: string): ParsedLead | null {
 
   // Require at least one of: name, phone, scheduledAt. Otherwise it's probably noise.
   const hasSignal = Boolean(lead.name || lead.phone || lead.scheduledAt);
-  if (!hasSignal) return null;
+  if (!hasSignal) {
+    return { lead: null, skipReason: "no_signal" };
+  }
 
-  return lead;
+  return { lead, skipReason: "parsed" };
 }
 
 /**

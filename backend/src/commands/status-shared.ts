@@ -1,4 +1,4 @@
-import { parseLead } from "../services/lead-parser.js";
+import { parseLeadWithReason } from "../services/lead-parser.js";
 import { formatInTz } from "../utils/dates.js";
 import { aggregateLeads, formatStatusReply } from "../utils/format.js";
 import type { CommandContext, CommandResult } from "./types.js";
@@ -47,18 +47,28 @@ export async function buildStatusReply(
     };
   }
 
-  const leads: Array<{ poster: string; parsed: ReturnType<typeof parseLead> }> = [];
-  let skipped = 0;
+  const leads: Array<{ poster: string; parsed: NonNullable<ReturnType<typeof parseLeadWithReason>["lead"]> }> = [];
+  const skippedByReason: Record<string, number> = {
+    too_short: 0,
+    no_signal: 0,
+    empty: 0,
+  };
 
   for (const msg of messages) {
-    const parsed = parseLead(msg.content);
-    if (!parsed) {
-      skipped += 1;
+    const result = parseLeadWithReason(msg.content);
+    if (!result.lead) {
+      skippedByReason[result.skipReason] =
+        (skippedByReason[result.skipReason] ?? 0) + 1;
       continue;
     }
     const poster = msg.senderName?.trim() || msg.senderPhone || "Unknown";
-    leads.push({ poster, parsed });
+    leads.push({ poster, parsed: result.lead });
   }
+
+  const skipped =
+    (skippedByReason.too_short ?? 0) +
+    (skippedByReason.no_signal ?? 0) +
+    (skippedByReason.empty ?? 0);
 
   if (leads.length === 0) {
     return {
@@ -68,7 +78,7 @@ export async function buildStatusReply(
   }
 
   const { byPerson, bySource } = aggregateLeads(
-    leads.map((l) => ({ poster: l.poster, parsed: l.parsed! })),
+    leads.map((l) => ({ poster: l.poster, parsed: l.parsed })),
   );
 
   const reply = formatStatusReply(
@@ -80,6 +90,7 @@ export async function buildStatusReply(
       byPerson,
       bySource,
       skipped,
+      skippedByReason,
     },
     shortDate,
   );
