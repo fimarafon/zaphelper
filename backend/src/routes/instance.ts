@@ -192,8 +192,8 @@ export const instanceRoutes: FastifyPluginAsync<InstanceRoutesDeps> = async (
       }
 
       // Step 1b: for participants whose phone number isn't in our contacts
-      // table, ask WhatsApp directly via fetchProfile. This is slow (one HTTP
-      // call per unknown participant) but runs once per backfill.
+      // table, ask WhatsApp directly via fetchProfile. Runs in parallel batches
+      // of 20 to keep total time under the HTTP timeout (nginx 300s).
       let profileLookups = 0;
       const unknownPhones = new Set<string>();
       for (const phoneJid of lidToPhone.values()) {
@@ -203,12 +203,23 @@ export const instanceRoutes: FastifyPluginAsync<InstanceRoutesDeps> = async (
         { unknown: unknownPhones.size },
         "Backfill: unresolved participants, will query fetchProfile",
       );
-      for (const phoneJid of unknownPhones) {
-        const phoneDigits = phoneJid.replace(/@.*$/, "");
-        const profile = await evolution.fetchProfile(phoneDigits);
-        if (profile?.name && !/^\d+$/.test(profile.name)) {
-          phoneToName.set(phoneJid, profile.name);
-          profileLookups += 1;
+
+      const phonesList = [...unknownPhones];
+      const CONCURRENCY = 20;
+      for (let i = 0; i < phonesList.length; i += CONCURRENCY) {
+        const batch = phonesList.slice(i, i + CONCURRENCY);
+        const results = await Promise.all(
+          batch.map(async (phoneJid) => {
+            const phoneDigits = phoneJid.replace(/@.*$/, "");
+            const profile = await evolution.fetchProfile(phoneDigits);
+            return { phoneJid, name: profile?.name ?? null };
+          }),
+        );
+        for (const r of results) {
+          if (r.name && !/^\d+$/.test(r.name)) {
+            phoneToName.set(r.phoneJid, r.name);
+            profileLookups += 1;
+          }
         }
       }
       fastify.log.info({ profileLookups }, "Backfill: profile lookups done");
