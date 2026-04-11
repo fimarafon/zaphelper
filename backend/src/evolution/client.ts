@@ -321,10 +321,15 @@ export class EvolutionClient {
   /**
    * Fetches one page of messages from Evolution's database.
    * Evolution's /chat/findMessages returns { messages: { total, pages, currentPage, records } }.
+   *
+   * `instanceOverride` lets you pull messages from a different Evolution instance
+   * than the one bound to this client — used for importing pushNames from
+   * older instances that captured them before the Evolution 2.3.x pushName bug.
    */
   async fetchMessagesPage(
     page: number,
     pageSize = 100,
+    instanceOverride?: string,
   ): Promise<{
     total: number;
     pages: number;
@@ -336,6 +341,7 @@ export class EvolutionClient {
       page,
       offset: pageSize,
     };
+    const instance = instanceOverride ?? this.instanceName;
     const res = await this.request<{
       messages: {
         total: number;
@@ -345,12 +351,55 @@ export class EvolutionClient {
       };
     }>(
       "POST",
-      `/chat/findMessages/${encodeURIComponent(this.instanceName)}`,
+      `/chat/findMessages/${encodeURIComponent(instance)}`,
       body,
     );
     return (
       res?.messages ?? { total: 0, pages: 0, currentPage: page, records: [] }
     );
+  }
+
+  /**
+   * Walks all messages from a given instance and returns a map of
+   * participant LID -> best human-readable pushName seen.
+   *
+   * "Best" means non-empty and non-digit-only. If multiple names are seen for
+   * the same LID, the longest one wins (catches "J.K " vs "Jk").
+   */
+  async collectPushNamesFromInstance(
+    instanceName: string,
+    maxPages = 200,
+  ): Promise<Map<string, string>> {
+    const result = new Map<string, string>();
+    let page = 1;
+    while (page <= maxPages) {
+      const pageData = await this.fetchMessagesPage(page, 100, instanceName);
+      if (!pageData.records || pageData.records.length === 0) break;
+      for (const record of pageData.records) {
+        const key = record.key as
+          | { participant?: string; remoteJid?: string; fromMe?: boolean }
+          | undefined;
+        const pushName = record.pushName as string | undefined;
+        if (!pushName || /^\d+$/.test(pushName)) continue;
+        // For group messages: map by participant LID
+        if (key?.participant) {
+          const existing = result.get(key.participant);
+          if (!existing || pushName.length > existing.length) {
+            result.set(key.participant, pushName);
+          }
+        }
+        // For DMs: map by remoteJid (when fromMe=false)
+        if (key?.remoteJid && !key.fromMe) {
+          const existing = result.get(key.remoteJid);
+          if (!existing || pushName.length > existing.length) {
+            result.set(key.remoteJid, pushName);
+          }
+        }
+      }
+      if (page >= pageData.pages) break;
+      page += 1;
+    }
+    return result;
   }
 
   async checkNumberExists(phone: string): Promise<boolean> {

@@ -354,6 +354,120 @@ export const instanceRoutes: FastifyPluginAsync<InstanceRoutesDeps> = async (
     },
   );
 
+  // Import pushNames from a DIFFERENT Evolution instance (same WhatsApp number,
+  // but a different historical instance that captured contact names before the
+  // Evolution 2.3.x pushName-overwrite bug broke them).
+  //
+  // The instance must be on the same Evolution API server we're already pointed
+  // at (uses the same API key). Typical use: import from "markar-a3525386" into
+  // "zaphelper-main" to resolve group participant LIDs to real names.
+  fastify.post<{ Body: { sourceInstance?: string; maxPages?: number } }>(
+    "/api/instance/import-names",
+    async (req, reply) => {
+      try {
+        requireAuth(req);
+      } catch {
+        return reply.code(401).send({ error: "Unauthorized" });
+      }
+
+      const sourceInstance = req.body?.sourceInstance;
+      if (!sourceInstance) {
+        return reply
+          .code(400)
+          .send({ error: "sourceInstance required (e.g. 'markar-a3525386')" });
+      }
+      const maxPages = req.body?.maxPages ?? 500;
+      const started = Date.now();
+
+      fastify.log.info(
+        { sourceInstance, maxPages },
+        "Importing pushNames from source instance",
+      );
+
+      // Step 1: collect LID/phone -> pushName from source instance
+      const namesByJid = await evolution.collectPushNamesFromInstance(
+        sourceInstance,
+        maxPages,
+      );
+      fastify.log.info(
+        { mappingCount: namesByJid.size },
+        "Collected pushNames from source",
+      );
+
+      // Step 2: build LID -> phoneNumber map from current instance's groups
+      // so we can update senderPhone to the real number AND apply the name.
+      const lidToPhone = new Map<string, string>();
+      try {
+        const groups = await evolution.fetchAllGroups(true);
+        for (const g of groups) {
+          for (const p of g.participants ?? []) {
+            if (p.id && p.phoneNumber) {
+              lidToPhone.set(p.id, p.phoneNumber);
+            }
+          }
+        }
+      } catch (err) {
+        fastify.log.warn({ err }, "Import: could not load groups");
+      }
+
+      // Step 3: persist every name in the Config table (key=name:<phone>) and
+      // apply to existing Message rows — by the LID digits AND by the real phone.
+      let configWrites = 0;
+      let rowsUpdated = 0;
+      let phoneUpdated = 0;
+
+      for (const [jid, name] of namesByJid.entries()) {
+        const jidDigits = jid.replace(/@.*$/, "");
+        const realPhoneJid = lidToPhone.get(jid);
+        const realPhoneDigits = realPhoneJid?.replace(/@.*$/, "") ?? null;
+
+        // Persist in Config so future webhook ingests reuse it.
+        // Key by the real phone if we have it, else by the JID digits.
+        const configKeyPhone = realPhoneDigits ?? jidDigits;
+        await prisma.config.upsert({
+          where: { key: `name:${configKeyPhone}` },
+          create: { key: `name:${configKeyPhone}`, value: name },
+          update: { value: name },
+        });
+        configWrites += 1;
+
+        // Update all existing messages where senderPhone = LID digits.
+        const resLid = await prisma.message.updateMany({
+          where: { senderPhone: jidDigits },
+          data: {
+            senderName: name,
+            ...(realPhoneDigits ? { senderPhone: realPhoneDigits } : {}),
+          },
+        });
+        rowsUpdated += resLid.count;
+        if (realPhoneDigits) phoneUpdated += resLid.count;
+
+        // Also update rows already rewritten to the real phone (case: previous
+        // backfill run replaced LID -> phone but didn't have the name yet).
+        if (realPhoneDigits && realPhoneDigits !== jidDigits) {
+          const resPhone = await prisma.message.updateMany({
+            where: { senderPhone: realPhoneDigits, senderName: null },
+            data: { senderName: name },
+          });
+          rowsUpdated += resPhone.count;
+        }
+      }
+
+      // Refresh the in-memory name cache so webhook ingests see the new mappings.
+      await ingest.refreshNameCache();
+
+      return {
+        ok: true,
+        durationMs: Date.now() - started,
+        sourceInstance,
+        namesCollected: namesByJid.size,
+        configWrites,
+        rowsUpdated,
+        phoneUpdated,
+      };
+    },
+  );
+
   // Manually set display names for phone numbers. Body is a plain object
   // where keys are phone numbers (digits only) and values are the display
   // name to use. The mapping is persisted in the Config table (one row
