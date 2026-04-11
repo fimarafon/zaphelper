@@ -90,13 +90,18 @@ export async function buildStatusReply(
   const { prisma, evolution, config, logger, incrementalSync } = ctx;
   const groupFilter = config.BE_HOME_LEADS_GROUP_NAME;
 
-  // CRITICAL: force a fresh sync BEFORE querying the DB. This guarantees the
-  // result reflects every message Evolution has received, even if the webhook
-  // dropped some (restart, timeout, edit events, etc.). The sync is bounded
-  // at 10 seconds; if Evolution is slow, we fall back to whatever we have.
-  // This is what makes /status* commands trustworthy for real-time decisions.
+  // Step 1: resolve the target group's chatId (fast — cached after first call,
+  // and the fallback strategy uses an indexed DB lookup). We need this BEFORE
+  // the sync so we can do a scoped sync that only fetches messages for this
+  // one chat (dramatically faster than a full 2-page general sync).
+  const chatId = await resolveGroupChatId(ctx, groupFilter);
+  const chatJid = chatId ? `${chatId}@g.us` : null;
+
+  // Step 2: scoped on-demand sync. Target latency 300-800ms. If Evolution is
+  // slow, bounded at 8s; after that we fall back to whatever we already have
+  // in the DB.
   try {
-    const syncResult = await incrementalSync.syncNowForCommand();
+    const syncResult = await incrementalSync.syncNowForCommand(chatJid ?? undefined);
     logger.debug(
       {
         saved: syncResult.saved,
@@ -110,14 +115,10 @@ export async function buildStatusReply(
     logger.warn({ err }, "On-demand sync failed, falling back to stored state");
   }
 
-  // Resolve the target group's chatId. Filtering by chatId is the reliable
-  // path — chatName filtering misses rows where chatName is null (which
-  // happens when a webhook delivers a group message without groupMetadata).
-  const chatId = await resolveGroupChatId(ctx, groupFilter);
+  // Step 3: opportunistic retrofit on chatName. Any rows with the right
+  // chatId but null chatName get their chatName populated. Fast — indexed
+  // update, usually zero rows, runs silently.
   if (chatId) {
-    // Opportunistic retrofit: backfill chatName on rows that have the right
-    // chatId but null chatName, so the dashboard Messages view displays the
-    // group name too. Fast (indexed update), runs silently.
     try {
       await prisma.message.updateMany({
         where: { chatId, chatName: null, isGroup: true },

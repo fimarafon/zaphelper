@@ -370,6 +370,36 @@ export class EvolutionClient {
   }
 
   /**
+   * Fast-path: fetch the most recent N messages for a SPECIFIC chat.
+   * Used by the on-demand sync before /status commands so we only pull
+   * what might matter for that report, not the entire instance.
+   *
+   * Returns a plain array of records (no pagination metadata wrapping).
+   */
+  async fetchMessagesForChat(
+    chatJid: string,
+    limit = 50,
+  ): Promise<Array<Record<string, unknown>>> {
+    try {
+      const body = {
+        where: { key: { remoteJid: chatJid } },
+        limit,
+      };
+      const res = await this.request<{
+        messages?: { records?: Array<Record<string, unknown>> };
+      }>(
+        "POST",
+        `/chat/findMessages/${encodeURIComponent(this.instanceName)}`,
+        body,
+      );
+      return res?.messages?.records ?? [];
+    } catch (err) {
+      this.logger.warn({ err, chatJid }, "fetchMessagesForChat failed");
+      return [];
+    }
+  }
+
+  /**
    * Walks all messages from a given instance and returns a map of
    * participant LID -> best human-readable pushName seen.
    *

@@ -23,9 +23,30 @@ export const auditCommand: Command = {
   async execute(ctx) {
     const { prisma, config, now, incrementalSync, logger } = ctx;
 
+    // Resolve the target group's chatId first so we can do a scoped on-demand
+    // sync (fast — ~500ms) instead of a general sync (~2s+).
+    let targetChatId: string | null = null;
+    try {
+      const sample = await prisma.message.findFirst({
+        where: {
+          isGroup: true,
+          chatName: {
+            contains: config.BE_HOME_LEADS_GROUP_NAME,
+            mode: "insensitive",
+          },
+        },
+        select: { chatId: true },
+      });
+      targetChatId = sample?.chatId ?? null;
+    } catch {
+      // fall through
+    }
+
+    const chatJid = targetChatId ? `${targetChatId}@g.us` : undefined;
+
     // Pull fresh data before reporting — same contract as /status*.
     try {
-      await incrementalSync.syncNowForCommand();
+      await incrementalSync.syncNowForCommand(chatJid);
     } catch (err) {
       logger.warn({ err }, "On-demand sync failed in /audit");
     }
@@ -55,26 +76,6 @@ export const auditCommand: Command = {
       start = range.start;
       end = range.end;
       label = range.label;
-    }
-
-    // Same chatId-first strategy as buildStatusReply so we catch rows with
-    // null chatName too. Inline here because audit.command.ts lives outside
-    // status-shared.ts and we want to keep its imports minimal.
-    let targetChatId: string | null = null;
-    try {
-      const sample = await prisma.message.findFirst({
-        where: {
-          isGroup: true,
-          chatName: {
-            contains: config.BE_HOME_LEADS_GROUP_NAME,
-            mode: "insensitive",
-          },
-        },
-        select: { chatId: true },
-      });
-      targetChatId = sample?.chatId ?? null;
-    } catch {
-      // fall through
     }
 
     const messages = await prisma.message.findMany({
