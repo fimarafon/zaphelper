@@ -40,6 +40,78 @@ export class MessageIngest {
     private readonly logger: Logger,
   ) {}
 
+  /**
+   * Backfill ingest — takes a raw Evolution record (from /chat/findMessages)
+   * and stores it. Different from `ingest()` which receives webhook payloads.
+   *
+   * Evolution API's /chat/findMessages returns records with this shape:
+   *   { id, key, pushName, messageType, message, messageTimestamp, instanceId, ... }
+   *
+   * We adapt it to look like a webhook messages.upsert payload and reuse the
+   * same extraction logic.
+   */
+  async ingestRaw(
+    record: Record<string, unknown>,
+    chatNameMap: Map<string, string>,
+  ): Promise<{ saved: boolean; duplicate: boolean }> {
+    const key = record.key as
+      | { id?: string; fromMe?: boolean; remoteJid?: string; participant?: string }
+      | undefined;
+    if (!key?.id || !key?.remoteJid) {
+      return { saved: false, duplicate: false };
+    }
+
+    // Normalize the message body: Evolution's record.message is the raw Baileys
+    // body, which matches what the webhook handler already knows how to parse.
+    const messageBody = (record.message ?? {}) as EvolutionMessageBody;
+
+    const rawTs = record.messageTimestamp as number | string | undefined;
+    const timestamp = resolveTimestamp(rawTs);
+
+    const fromMe = Boolean(key.fromMe);
+    const isGroup = isGroupJid(key.remoteJid);
+    const chatId = jidToChatId(key.remoteJid);
+
+    const senderJidRaw = isGroup ? key.participant : key.remoteJid;
+    const senderPhone = senderJidRaw ? jidToChatId(senderJidRaw) : null;
+
+    // Chat name: groups have a subject in the chat record we looked up earlier.
+    const chatName = chatNameMap.get(key.remoteJid) ?? (record.pushName as string | undefined) ?? null;
+
+    const { content, messageType } = extractContent(messageBody);
+
+    const selfJid = this.selfIdentity.getJid();
+    const isSelfChat = fromMe && selfJid !== null && key.remoteJid === selfJid;
+
+    try {
+      await this.prisma.message.create({
+        data: {
+          waMessageId: key.id,
+          chatId,
+          chatName,
+          senderPhone,
+          senderName: (record.pushName as string | undefined) ?? null,
+          content,
+          rawMessage: record as unknown as Prisma.InputJsonValue,
+          messageType,
+          isGroup,
+          isFromMe: fromMe,
+          isSelfChat,
+          timestamp,
+        },
+      });
+      return { saved: true, duplicate: false };
+    } catch (err) {
+      if (
+        err instanceof Prisma.PrismaClientKnownRequestError &&
+        err.code === "P2002"
+      ) {
+        return { saved: false, duplicate: true };
+      }
+      throw err;
+    }
+  }
+
   async ingest(data: EvolutionMessagesUpsertData): Promise<IngestResult> {
     const key = data.key;
     if (!key?.id) {

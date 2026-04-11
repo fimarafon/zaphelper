@@ -111,7 +111,7 @@ async function bootstrap() {
 
   await app.register(webhookRoutes, { ingest, dispatcher, selfIdentity, prisma, config });
   await app.register(authRoutes, { config });
-  await app.register(instanceRoutes, { prisma, evolution, config, selfIdentity });
+  await app.register(instanceRoutes, { prisma, evolution, config, selfIdentity, ingest });
   await app.register(messagesRoutes, { prisma });
   await app.register(commandRoutes, { prisma, registry, dispatcher });
   await app.register(remindersRoutes, { prisma, scheduler });

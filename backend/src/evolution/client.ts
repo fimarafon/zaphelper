@@ -218,6 +218,57 @@ export class EvolutionClient {
     }
   }
 
+  /**
+   * Fetches all chats this instance knows about (Evolution's own PostgreSQL cache).
+   */
+  async fetchAllChats(): Promise<Array<Record<string, unknown>>> {
+    try {
+      const res = await this.request<Array<Record<string, unknown>>>(
+        "GET",
+        `/chat/findChats/${encodeURIComponent(this.instanceName)}`,
+      );
+      return Array.isArray(res) ? res : [];
+    } catch (err) {
+      this.logger.warn({ err }, "fetchAllChats failed");
+      return [];
+    }
+  }
+
+  /**
+   * Fetches one page of messages from Evolution's database.
+   * Evolution's /chat/findMessages returns { messages: { total, pages, currentPage, records } }.
+   */
+  async fetchMessagesPage(
+    page: number,
+    pageSize = 100,
+  ): Promise<{
+    total: number;
+    pages: number;
+    currentPage: number;
+    records: Array<Record<string, unknown>>;
+  }> {
+    const body = {
+      where: {},
+      page,
+      offset: pageSize,
+    };
+    const res = await this.request<{
+      messages: {
+        total: number;
+        pages: number;
+        currentPage: number;
+        records: Array<Record<string, unknown>>;
+      };
+    }>(
+      "POST",
+      `/chat/findMessages/${encodeURIComponent(this.instanceName)}`,
+      body,
+    );
+    return (
+      res?.messages ?? { total: 0, pages: 0, currentPage: page, records: [] }
+    );
+  }
+
   async checkNumberExists(phone: string): Promise<boolean> {
     const cleaned = cleanPhone(phone);
     try {
