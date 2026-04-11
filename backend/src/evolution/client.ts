@@ -220,16 +220,40 @@ export class EvolutionClient {
 
   /**
    * Fetches all chats this instance knows about (Evolution's own PostgreSQL cache).
+   * Uses POST now — /chat/findChats only accepts POST in recent Evolution builds.
    */
   async fetchAllChats(): Promise<Array<Record<string, unknown>>> {
     try {
       const res = await this.request<Array<Record<string, unknown>>>(
-        "GET",
+        "POST",
         `/chat/findChats/${encodeURIComponent(this.instanceName)}`,
+        { where: {} },
       );
       return Array.isArray(res) ? res : [];
     } catch (err) {
       this.logger.warn({ err }, "fetchAllChats failed");
+      return [];
+    }
+  }
+
+  /**
+   * Fetches all groups with their subjects — this is where group display names
+   * live. /chat/findChats doesn't carry the subject field.
+   */
+  async fetchAllGroups(): Promise<Array<{ id: string; subject: string }>> {
+    try {
+      const res = await this.request<Array<Record<string, unknown>>>(
+        "GET",
+        `/group/fetchAllGroups/${encodeURIComponent(this.instanceName)}?getParticipants=false`,
+      );
+      if (!Array.isArray(res)) return [];
+      return res
+        .filter((g): g is { id: string; subject: string } =>
+          typeof g.id === "string" && typeof g.subject === "string",
+        )
+        .map((g) => ({ id: g.id, subject: g.subject }));
+    } catch (err) {
+      this.logger.warn({ err }, "fetchAllGroups failed");
       return [];
     }
   }
