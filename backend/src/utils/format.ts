@@ -14,42 +14,42 @@ export interface LeadGroup {
  * Formats a lead group summary as a WhatsApp-friendly multi-line string.
  * Example output:
  *
- *   Leads Agendados Hoje (04/10):
+ *   📊 Scheduled Leads — Today (04/10):
  *   Total: 15 leads
  *
- *   Por pessoa:
+ *   By person:
  *   • Laura — 10
  *   • Linda — 4
  *   • Alex — 1
  *
- *   Por fonte:
+ *   By source:
  *   • Thumbtack — 6
  *   • Google — 5
  *   • Angi — 4
  */
 export function formatStatusReply(group: LeadGroup, shortDate: string): string {
-  const header = `📊 Leads Agendados ${group.label} (${shortDate}):`;
+  const header = `📊 Scheduled Leads — ${group.label} (${shortDate}):`;
 
   if (group.total === 0) {
-    return `${header}\nNenhum lead encontrado no período.`;
+    return `${header}\nNo leads found in this period.`;
   }
 
   const lines: string[] = [header, `Total: ${group.total} leads`, ""];
 
-  lines.push("Por pessoa:");
+  lines.push("*By person:*");
   for (const p of group.byPerson) {
     lines.push(`• ${p.name} — ${p.count}`);
   }
 
   lines.push("");
-  lines.push("Por fonte:");
+  lines.push("*By source:*");
   for (const s of group.bySource) {
     lines.push(`• ${s.source} — ${s.count}`);
   }
 
   if (group.skipped > 0) {
     lines.push("");
-    lines.push(`_${group.skipped} mensagem(s) não puderam ser parseadas como lead._`);
+    lines.push(`_${group.skipped} message(s) could not be parsed as leads._`);
   }
 
   return lines.join("\n");

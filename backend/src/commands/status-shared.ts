@@ -40,7 +40,7 @@ export async function buildStatusReply(
     const short = formatInTz(ctx.now, config.TZ, "MM/dd");
     return {
       success: true,
-      reply: `📊 Leads Agendados ${window.label} (${short}):\nNenhum lead no período.\n\nVerifique se o grupo "${groupFilter}" existe ou ajuste BE_HOME_LEADS_GROUP_NAME.`,
+      reply: `📊 Scheduled Leads — ${window.label} (${short}):\nNo leads in this period.\n\nCheck that the group "${groupFilter}" exists or adjust BE_HOME_LEADS_GROUP_NAME.`,
     };
   }
 
@@ -61,7 +61,7 @@ export async function buildStatusReply(
     const short = formatInTz(ctx.now, config.TZ, "MM/dd");
     return {
       success: true,
-      reply: `📊 Leads Agendados ${window.label} (${short}):\nTotal: 0 leads (${messages.length} mensagens no grupo, nenhuma reconhecida como lead).`,
+      reply: `📊 Scheduled Leads — ${window.label} (${short}):\nTotal: 0 leads (${messages.length} messages in the group, none recognized as a lead).`,
     };
   }
 

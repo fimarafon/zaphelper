@@ -5,10 +5,10 @@ import { startOfTodayInTz } from "../utils/dates.js";
 export const statusTodayCommand: Command = {
   name: "statustoday",
   aliases: ["today"],
-  description: "Resume os leads agendados hoje no grupo Be Home.",
+  description: "Summary of scheduled leads posted today in the Be Home group.",
   usage: "/statustoday",
   async execute(ctx) {
     const start = startOfTodayInTz(ctx.now, ctx.config.TZ);
-    return buildStatusReply(ctx, { label: "Hoje", start, end: ctx.now });
+    return buildStatusReply(ctx, { label: "Today", start, end: ctx.now });
   },
 };

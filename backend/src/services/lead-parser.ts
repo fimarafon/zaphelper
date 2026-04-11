@@ -37,28 +37,107 @@ const STRIP_MENTION_RX = /^[~@]\s*/;
  *
  * To add a new source: add an entry to CANONICAL_SOURCES with its aliases.
  */
-const CANONICAL_SOURCES: Array<{ canonical: string; aliases: string[] }> = [
-  { canonical: "Thumbtack", aliases: ["thumbtack", "thumbtak", "thumback", "thumb tack", "tumbtack", "tumtack"] },
-  { canonical: "Angi", aliases: ["angi", "angie", "angis", "angi's", "angie's list", "angieslist", "angislist"] },
-  { canonical: "Yelp", aliases: ["yelp", "yellp"] },
-  { canonical: "Google", aliases: ["google", "googl", "goolge", "gogle", "google ads", "google lsa", "lsa"] },
-  { canonical: "Facebook", aliases: ["facebook", "facbook", "face book", "fb", "facebook ads", "meta"] },
-  { canonical: "Referral", aliases: ["referral", "referal", "referred", "reference", "indicação", "indicacao", "indicado", "word of mouth", "wom"] },
+const CANONICAL_SOURCES: Array<{
+  canonical: string;
+  aliases: string[];
+  fuzzyRoots?: string[]; // prefixes to match even with typos (minimum length 3)
+}> = [
+  {
+    canonical: "Thumbtack",
+    aliases: [
+      "thumbtack", "thumbtac", "thumbtak", "thumback", "thumb tack",
+      "tumbtack", "tumtack", "tumbtac", "thumtack", "thumbtck",
+      "thumbteck", "tumbteck", "thmbtack", "thumbatck", "tbk",
+    ],
+    fuzzyRoots: ["thumb", "tumb", "thmb"],
+  },
+  {
+    canonical: "Angi",
+    aliases: [
+      "angi", "angie", "angis", "angi's", "angy",
+      "angie's list", "angieslist", "angislist", "angies list",
+      "angi ads", "angi pro", "ang",
+    ],
+    fuzzyRoots: ["angi", "angy"],
+  },
+  {
+    canonical: "Yelp",
+    aliases: ["yelp", "yellp", "yepl", "yeelp", "yelp ads"],
+    fuzzyRoots: ["yelp", "yell"],
+  },
+  {
+    canonical: "Google",
+    aliases: [
+      "google", "googl", "goolge", "gogle", "googel", "googles", "gooogle",
+      "google ads", "google lsa", "lsa", "gads", "gmb", "google my business",
+      "google business", "google maps", "adwords",
+    ],
+    fuzzyRoots: ["googl", "goog", "gogl"],
+  },
+  {
+    canonical: "Facebook",
+    aliases: [
+      "facebook", "facbook", "facebok", "facbok", "face book", "faceboook",
+      "fb", "fb ads", "facebook ads", "facebookads",
+      "meta", "meta ads", "metaads", "meta ad", "meta-ads",
+      "instagram", "ig", "ig ads", "instagram ads",
+    ],
+    fuzzyRoots: ["faceb", "facb", "facbo"],
+  },
+  {
+    canonical: "Referral",
+    aliases: [
+      "referral", "referal", "referrals", "referals", "referred", "refered",
+      "reference", "referer", "referrer",
+      "indicação", "indicacao", "indicado", "indica", "indicacion",
+      "word of mouth", "wom", "friend", "recommendation", "recommend", "recomend",
+    ],
+    fuzzyRoots: ["refer", "referr"],
+  },
 ];
 
 /**
+ * Levenshtein distance for typo tolerance. O(m*n) — fine for short strings.
+ */
+function levenshtein(a: string, b: string): number {
+  if (a === b) return 0;
+  if (a.length === 0) return b.length;
+  if (b.length === 0) return a.length;
+  const prev = new Array<number>(b.length + 1);
+  const curr = new Array<number>(b.length + 1);
+  for (let j = 0; j <= b.length; j++) prev[j] = j;
+  for (let i = 1; i <= a.length; i++) {
+    curr[0] = i;
+    for (let j = 1; j <= b.length; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      curr[j] = Math.min(
+        (curr[j - 1] ?? 0) + 1,
+        (prev[j] ?? 0) + 1,
+        (prev[j - 1] ?? 0) + cost,
+      );
+    }
+    for (let j = 0; j <= b.length; j++) prev[j] = curr[j] ?? 0;
+  }
+  return prev[b.length] ?? 0;
+}
+
+/**
  * Match any line/string against the canonical source list.
- * Strategy:
+ *
+ * Detection strategy (first match wins):
  *   1. Normalize: lowercase, strip punctuation/parens
- *   2. Try exact alias match (word-boundary)
- *   3. Try levenshtein-like "contains an alias" fuzzy match
+ *   2. Exact alias match (word-boundary for single words, substring for phrases)
+ *   3. Fuzzy per-word matching: for every word in the text, find the closest
+ *      alias (Levenshtein ≤ 2 for words ≥5 chars, ≤1 for shorter) and accept
+ *      if the match is unambiguous.
+ *   4. Fuzzy root matching: prefix heuristic for radical typos like "tumbteck"
+ *
  * Returns the canonical name or null.
  */
 export function detectSource(text: string): string | null {
   if (!text) return null;
 
-  // Normalize: lowercase, remove parens and punctuation except spaces,
-  // collapse whitespace.
+  // Normalize: lowercase, strip punctuation except spaces, collapse whitespace.
   const normalized = text
     .toLowerCase()
     .replace(/[()[\]{}<>.,;:!?*_\-+/\\'"“”‘’]/g, " ")
@@ -67,22 +146,57 @@ export function detectSource(text: string): string | null {
 
   if (!normalized) return null;
 
-  // Word set for fast substring checks.
-  const words = new Set(normalized.split(" "));
+  const words = normalized.split(" ").filter(Boolean);
+  const wordSet = new Set(words);
 
+  // --- Pass 1: exact alias match ---
   for (const { canonical, aliases } of CANONICAL_SOURCES) {
     for (const alias of aliases) {
-      // Single-word alias: must appear as a whole word in the text.
       if (!alias.includes(" ")) {
-        if (words.has(alias)) return canonical;
-        // Also catch substring match for stubborn typos (min 4 chars).
+        if (wordSet.has(alias)) return canonical;
         if (alias.length >= 4 && normalized.includes(alias)) return canonical;
       } else {
-        // Multi-word alias: exact substring match.
         if (normalized.includes(alias)) return canonical;
       }
     }
   }
+
+  // --- Pass 2: fuzzy per-word Levenshtein match ---
+  // For each word in the text, find the closest single-word alias and accept
+  // if the distance is small relative to the word length.
+  for (const word of words) {
+    if (word.length < 3) continue;
+    for (const { canonical, aliases } of CANONICAL_SOURCES) {
+      for (const alias of aliases) {
+        if (alias.includes(" ")) continue; // phrases handled in pass 1
+        if (Math.abs(alias.length - word.length) > 2) continue;
+        const dist = levenshtein(word, alias);
+        // 0-1 chars off for short aliases (3-5), 2 chars for longer
+        const threshold = alias.length >= 6 ? 2 : 1;
+        if (dist <= threshold) return canonical;
+      }
+    }
+  }
+
+  // --- Pass 3: fuzzy root prefix match for radical typos ---
+  // "tumbteck" -> fuzzyRoot "tumb" (Thumbtack), "ang" -> "angi" (Angi)
+  for (const word of words) {
+    if (word.length < 3) continue;
+    for (const { canonical, fuzzyRoots } of CANONICAL_SOURCES) {
+      if (!fuzzyRoots) continue;
+      for (const root of fuzzyRoots) {
+        if (word.startsWith(root)) return canonical;
+        // Also: is the word "close enough" to the root?
+        if (
+          word.length >= root.length &&
+          levenshtein(word.slice(0, root.length), root) <= 1
+        ) {
+          return canonical;
+        }
+      }
+    }
+  }
+
   return null;
 }
 

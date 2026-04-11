@@ -3,8 +3,8 @@ import type { Command } from "./types.js";
 
 export const remindersCommand: Command = {
   name: "reminders",
-  aliases: ["lembretes", "listreminders"],
-  description: "Lista todos os lembretes ativos.",
+  aliases: ["listreminders"],
+  description: "List all active reminders.",
   usage: "/reminders",
   async execute(ctx) {
     const { prisma, config } = ctx;
@@ -14,10 +14,10 @@ export const remindersCommand: Command = {
     });
 
     if (active.length === 0) {
-      return { success: true, reply: "📭 Nenhum lembrete ativo." };
+      return { success: true, reply: "📭 No active reminders." };
     }
 
-    const lines = [`📋 *${active.length} lembrete(s) ativo(s):*`, ""];
+    const lines = [`📋 *${active.length} active reminder(s):*`, ""];
     active.forEach((r, i) => {
       const when = formatInTz(r.scheduledAt, config.TZ, "yyyy-MM-dd HH:mm");
       lines.push(`${i + 1}. ${when} — ${r.message}`);

@@ -3,18 +3,18 @@ import type { Command } from "./types.js";
 
 export const reminderCommand: Command = {
   name: "reminder",
-  aliases: ["remind", "lembrete"],
-  description: "Agenda um lembrete — o bot te envia a mensagem no dia/hora.",
-  usage: "/reminder YYYY-MM-DD HH:MM <mensagem>",
+  aliases: ["remind"],
+  description: "Schedule a reminder — I'll DM you at the given date/time.",
+  usage: "/reminder YYYY-MM-DD HH:MM <message>",
   async execute(ctx) {
     const { args, prisma, scheduler, config } = ctx;
     if (args.length < 3) {
       return {
         success: false,
         reply:
-          "❌ Formato inválido.\n" +
-          "Use: `/reminder YYYY-MM-DD HH:MM <mensagem>`\n" +
-          "Exemplo: `/reminder 2026-04-14 09:00 Ligar pro fornecedor`",
+          "❌ Invalid format.\n" +
+          "Use: `/reminder YYYY-MM-DD HH:MM <message>`\n" +
+          "Example: `/reminder 2026-04-14 09:00 Call the supplier`",
         error: "too_few_args",
       };
     }
@@ -27,7 +27,7 @@ export const reminderCommand: Command = {
     if (!scheduledAt || Number.isNaN(scheduledAt.getTime())) {
       return {
         success: false,
-        reply: `❌ Não consegui interpretar "${dateStr} ${timeStr}". Use o formato YYYY-MM-DD HH:MM.`,
+        reply: `❌ Could not parse "${dateStr} ${timeStr}". Use format YYYY-MM-DD HH:MM.`,
         error: "parse",
       };
     }
@@ -35,7 +35,7 @@ export const reminderCommand: Command = {
     if (scheduledAt.getTime() <= Date.now()) {
       return {
         success: false,
-        reply: "❌ O horário do lembrete precisa estar no futuro.",
+        reply: "❌ Reminder time must be in the future.",
         error: "past",
       };
     }
@@ -53,7 +53,7 @@ export const reminderCommand: Command = {
     const localized = formatInTz(scheduledAt, config.TZ, "yyyy-MM-dd HH:mm");
     return {
       success: true,
-      reply: `✅ Lembrete marcado para *${localized}* (${config.TZ})\n> ${message}`,
+      reply: `✅ Reminder set for *${localized}* (${config.TZ})\n> ${message}`,
     };
   },
 };

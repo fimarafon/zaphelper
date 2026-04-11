@@ -5,10 +5,10 @@ import { startOfWeekMondayInTz } from "../utils/dates.js";
 export const statusWeekCommand: Command = {
   name: "statusweek",
   aliases: ["week"],
-  description: "Resume os leads agendados da semana (seg → agora).",
+  description: "Summary of scheduled leads this week (Mon → now).",
   usage: "/statusweek",
   async execute(ctx) {
     const start = startOfWeekMondayInTz(ctx.now, ctx.config.TZ);
-    return buildStatusReply(ctx, { label: "Semana", start, end: ctx.now });
+    return buildStatusReply(ctx, { label: "This week", start, end: ctx.now });
   },
 };

@@ -60,7 +60,7 @@ export class CommandDispatcher {
     });
 
     if (!cmd) {
-      const reply = `❓ Comando desconhecido: /${cmdName}\nUse /help para ver os disponíveis.`;
+      const reply = `❓ Unknown command: /${cmdName}\nUse /help to see available commands.`;
       await this.safeSend(selfPhone, reply);
       await this.prisma.commandLog.update({
         where: { id: logRow.id },
@@ -103,7 +103,7 @@ export class CommandDispatcher {
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       this.logger.error({ err, cmd: cmd.name }, "Command execution failed");
-      const reply = `💥 Erro executando /${cmd.name}:\n${msg}`;
+      const reply = `💥 Error running /${cmd.name}:\n${msg}`;
       await this.safeSend(selfPhone, reply);
       await this.prisma.commandLog.update({
         where: { id: logRow.id },

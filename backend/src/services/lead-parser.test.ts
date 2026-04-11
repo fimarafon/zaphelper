@@ -46,14 +46,66 @@ Project: Bathroom
     expect(lead!.source).toBe("Angi");
   });
 
-  it("handles multi-word sources", () => {
-    const input = `Sam Lee
+  it("normalizes Facebook Ads / Meta / FB variations to Facebook", () => {
+    const variants = [
+      "(Facebook Ads)",
+      "(FB)",
+      "Meta ads",
+      "Source: Instagram",
+      "META ADS",
+    ];
+    for (const srcLine of variants) {
+      const lead = parseLead(`Sam Lee
 +1 555-2222
 Scheduled: 2026-04-10 11:00
-(Facebook Ads)`;
+${srcLine}`);
+      expect(lead, srcLine).not.toBeNull();
+      expect(lead!.source, srcLine).toBe("Facebook");
+    }
+  });
+
+  it("handles typos in source names", () => {
+    const typos: Array<[string, string]> = [
+      ["Thumbtack typo", "thumbtak"],
+      ["Angi typo", "angie's"],
+      ["Google typo", "goolge"],
+      ["Facebook typo", "facbook"],
+      ["Yelp typo", "yellp"],
+      ["Referral typo", "referal"],
+      ["Caps Thumbtack", "THUMBTACK"],
+      ["Mixed Angi", "ANGI"],
+      ["No parens Google", "Google"],
+    ];
+    const expected: Record<string, string> = {
+      "Thumbtack typo": "Thumbtack",
+      "Angi typo": "Angi",
+      "Google typo": "Google",
+      "Facebook typo": "Facebook",
+      "Yelp typo": "Yelp",
+      "Referral typo": "Referral",
+      "Caps Thumbtack": "Thumbtack",
+      "Mixed Angi": "Angi",
+      "No parens Google": "Google",
+    };
+    for (const [label, line] of typos) {
+      const lead = parseLead(`Sam Lee
++1 555-9999
+Scheduled: 2026-04-10 11:00
+${line}`);
+      expect(lead, label).not.toBeNull();
+      expect(lead!.source, label).toBe(expected[label]);
+    }
+  });
+
+  it("detects source even when it's buried mid-message", () => {
+    const input = `Client Name
++1 555-1111
+Scheduled: Monday 3pm
+We got this lead from Angi yesterday.
+Project: bathroom remodel`;
     const lead = parseLead(input);
     expect(lead).not.toBeNull();
-    expect(lead!.source).toBe("Facebook Ads");
+    expect(lead!.source).toBe("Angi");
   });
 
   it("strips WhatsApp mention prefix from name heuristic", () => {
