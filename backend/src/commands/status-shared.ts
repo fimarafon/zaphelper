@@ -7,6 +7,8 @@ export interface StatusWindow {
   label: string;
   start: Date;
   end: Date;
+  /** Optional override for the "(MM/DD)" subtitle — defaults to today. */
+  shortDate?: string;
 }
 
 /**
@@ -36,11 +38,12 @@ export async function buildStatusReply(
     "Status query loaded messages",
   );
 
+  const shortDate = window.shortDate ?? formatInTz(ctx.now, config.TZ, "MM/dd");
+
   if (messages.length === 0) {
-    const short = formatInTz(ctx.now, config.TZ, "MM/dd");
     return {
       success: true,
-      reply: `📊 Scheduled Leads — ${window.label} (${short}):\nNo leads in this period.\n\nCheck that the group "${groupFilter}" exists or adjust BE_HOME_LEADS_GROUP_NAME.`,
+      reply: `📊 Scheduled Leads — ${window.label} (${shortDate}):\nNo leads in this period.\n\nCheck that the group "${groupFilter}" exists or adjust BE_HOME_LEADS_GROUP_NAME.`,
     };
   }
 
@@ -58,10 +61,9 @@ export async function buildStatusReply(
   }
 
   if (leads.length === 0) {
-    const short = formatInTz(ctx.now, config.TZ, "MM/dd");
     return {
       success: true,
-      reply: `📊 Scheduled Leads — ${window.label} (${short}):\nTotal: 0 leads (${messages.length} messages in the group, none recognized as a lead).`,
+      reply: `📊 Scheduled Leads — ${window.label} (${shortDate}):\nTotal: 0 leads (${messages.length} messages in the group, none recognized as a lead).`,
     };
   }
 
@@ -69,7 +71,6 @@ export async function buildStatusReply(
     leads.map((l) => ({ poster: l.poster, parsed: l.parsed! })),
   );
 
-  const short = formatInTz(ctx.now, config.TZ, "MM/dd");
   const reply = formatStatusReply(
     {
       label: window.label,
@@ -80,7 +81,7 @@ export async function buildStatusReply(
       bySource,
       skipped,
     },
-    short,
+    shortDate,
   );
 
   return { success: true, reply };

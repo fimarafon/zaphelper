@@ -34,12 +34,6 @@ export class CommandDispatcher {
     const content = message.content.trim();
     if (!content.startsWith("/")) return;
 
-    // Strip leading "/" and split into name + args.
-    const withoutSlash = content.slice(1).trim();
-    const [rawCmd = "", ...rest] = withoutSlash.split(/\s+/);
-    const cmdName = rawCmd.toLowerCase();
-    const rawInput = withoutSlash.slice(rawCmd.length).trim();
-
     const selfJid = this.selfIdentity.getJid();
     const selfPhone = this.selfIdentity.getPhone();
     if (!selfJid || !selfPhone) {
@@ -47,34 +41,44 @@ export class CommandDispatcher {
       return;
     }
 
-    const cmd = this.registry.resolve(cmdName);
+    // Smart parse: handles both "/status 04/09" and "/status04/09" (no space).
+    const withoutSlash = content.slice(1).trim();
+    const parsed = this.registry.parseCommandLine(withoutSlash);
 
-    const logRow = await this.prisma.commandLog.create({
-      data: {
-        command: cmdName,
-        args: rawInput,
-        rawInput: content,
-        messageId: message.id,
-        status: cmd ? "SUCCESS" : "NOT_FOUND",
-      },
-    });
-
-    if (!cmd) {
-      const reply = `❓ Unknown command: /${cmdName}\nUse /help to see available commands.`;
-      await this.safeSend(selfPhone, reply);
-      await this.prisma.commandLog.update({
-        where: { id: logRow.id },
+    if (!parsed) {
+      // Not a known command — log the unresolved name and reply with /help hint.
+      const firstToken = withoutSlash.split(/\s+/)[0] ?? "";
+      const cmdName = firstToken.toLowerCase();
+      await this.prisma.commandLog.create({
         data: {
+          command: cmdName,
+          args: withoutSlash.slice(firstToken.length).trim(),
+          rawInput: content,
+          messageId: message.id,
           status: "NOT_FOUND",
-          output: reply,
+          output: null,
           durationMs: Date.now() - start,
         },
       });
+      const reply = `❓ Unknown command: /${cmdName}\nUse /help to see available commands.`;
+      await this.safeSend(selfPhone, reply);
       return;
     }
 
+    const { command: cmd, rawInput, args } = parsed;
+
+    const logRow = await this.prisma.commandLog.create({
+      data: {
+        command: cmd.name,
+        args: rawInput || null,
+        rawInput: content,
+        messageId: message.id,
+        status: "SUCCESS",
+      },
+    });
+
     const ctx: CommandContext = {
-      args: rest,
+      args,
       rawInput,
       command: cmd.name,
       prisma: this.prisma,
@@ -131,32 +135,23 @@ export class CommandDispatcher {
     if (!content.startsWith("/")) {
       return {
         success: false,
-        reply: "Input precisa começar com /",
+        reply: "Input must start with /",
         error: "bad_input",
       };
     }
 
     const withoutSlash = content.slice(1).trim();
-    const [rawCmd = "", ...rest] = withoutSlash.split(/\s+/);
-    const cmdName = rawCmd.toLowerCase();
-    const rawInput = withoutSlash.slice(rawCmd.length).trim();
+    const parsed = this.registry.parseCommandLine(withoutSlash);
 
-    const cmd = this.registry.resolve(cmdName);
-
-    const logRow = await this.prisma.commandLog.create({
-      data: {
-        command: cmdName,
-        args: rawInput || null,
-        rawInput: content,
-        status: cmd ? "SUCCESS" : "NOT_FOUND",
-      },
-    });
-
-    if (!cmd) {
-      const reply = `❓ Comando desconhecido: /${cmdName}\nUse /help para ver os disponíveis.`;
-      await this.prisma.commandLog.update({
-        where: { id: logRow.id },
+    if (!parsed) {
+      const firstToken = withoutSlash.split(/\s+/)[0] ?? "";
+      const cmdName = firstToken.toLowerCase();
+      const reply = `❓ Unknown command: /${cmdName}\nUse /help to see available commands.`;
+      await this.prisma.commandLog.create({
         data: {
+          command: cmdName,
+          args: withoutSlash.slice(firstToken.length).trim() || null,
+          rawInput: content,
           status: "NOT_FOUND",
           output: reply,
           durationMs: Date.now() - start,
@@ -165,6 +160,17 @@ export class CommandDispatcher {
       return { success: false, reply, error: "not_found" };
     }
 
+    const { command: cmd, rawInput, args } = parsed;
+
+    const logRow = await this.prisma.commandLog.create({
+      data: {
+        command: cmd.name,
+        args: rawInput || null,
+        rawInput: content,
+        status: "SUCCESS",
+      },
+    });
+
     // For inline runs, use real self-identity if known, otherwise fall back to
     // placeholder values — commands that actually need to send via Evolution
     // (reminders, etc.) will still work IF self-identity is configured.
@@ -172,7 +178,7 @@ export class CommandDispatcher {
     const selfPhone = this.selfIdentity.getPhone() ?? "0000000000";
 
     const ctx: CommandContext = {
-      args: rest,
+      args,
       rawInput,
       command: cmd.name,
       prisma: this.prisma,

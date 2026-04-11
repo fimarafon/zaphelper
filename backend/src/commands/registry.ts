@@ -2,8 +2,12 @@ import type { Command } from "./types.js";
 import { helpCommand } from "./help.command.js";
 import { reminderCommand } from "./reminder.command.js";
 import { remindersCommand } from "./reminders.command.js";
+import { statusCommand } from "./status.command.js";
+import { status7DaysCommand } from "./status-7days.command.js";
+import { statusMonthCommand } from "./status-month.command.js";
 import { statusTodayCommand } from "./status-today.command.js";
 import { statusWeekCommand } from "./status-week.command.js";
+import { statusYesterdayCommand } from "./status-yesterday.command.js";
 
 /**
  * Explicit imports over glob auto-discovery — gives us typed errors at build
@@ -16,10 +20,17 @@ import { statusWeekCommand } from "./status-week.command.js";
  *   3. Restart the container.
  */
 export const allCommands: Command[] = [
+  // Status commands — shortcuts first, then the generic /status for specific dates/ranges.
   statusTodayCommand,
+  statusYesterdayCommand,
+  status7DaysCommand,
   statusWeekCommand,
+  statusMonthCommand,
+  statusCommand,
+  // Reminders
   reminderCommand,
   remindersCommand,
+  // Misc
   helpCommand,
 ];
 
@@ -41,6 +52,58 @@ export class CommandRegistry {
 
   resolve(name: string): Command | null {
     return this.commands.get(name.toLowerCase()) ?? null;
+  }
+
+  /**
+   * Smart command parser: accepts the full input after the leading "/" and
+   * returns { command, rawInput, args } if we can resolve it.
+   *
+   * Handles two input styles:
+   *   1. "statustoday"            → command="statustoday", rawInput="", args=[]
+   *   2. "status 04/09"           → command="status", rawInput="04/09", args=["04/09"]
+   *   3. "status04/09"            → same as above (smart prefix detection)
+   *   4. "status04/03to04/09"     → command="status", rawInput="04/03to04/09"
+   *   5. "reminder 2026-04-14 09:00 call"  → command="reminder", rawInput="2026-04-14 09:00 call"
+   *
+   * For case 3/4, we look for the longest known command prefix that matches
+   * the start of the input. We check longest-first so "statusyesterday" wins
+   * over "status".
+   */
+  parseCommandLine(input: string): {
+    command: Command;
+    rawInput: string;
+    args: string[];
+  } | null {
+    const trimmed = input.trim();
+    if (!trimmed) return null;
+
+    // Try whitespace-separated first (most natural case).
+    const wsSplit = trimmed.split(/\s+/);
+    const firstToken = wsSplit[0]!.toLowerCase();
+    const directMatch = this.commands.get(firstToken);
+    if (directMatch) {
+      const rawInput = trimmed.slice(firstToken.length).trim();
+      const args = rawInput ? rawInput.split(/\s+/) : [];
+      return { command: directMatch, rawInput, args };
+    }
+
+    // No space split match — maybe the user typed "/status04/09" with no space.
+    // Try matching the longest command name as a prefix of the first token.
+    const lowerFirst = firstToken.toLowerCase();
+    const candidateKeys = [...this.commands.keys()].sort(
+      (a, b) => b.length - a.length,
+    );
+    for (const key of candidateKeys) {
+      if (lowerFirst.startsWith(key) && lowerFirst.length > key.length) {
+        const cmd = this.commands.get(key)!;
+        // The remainder of the first token becomes the start of rawInput.
+        const remainder = trimmed.slice(key.length).trim();
+        const args = remainder ? remainder.split(/\s+/) : [];
+        return { command: cmd, rawInput: remainder, args };
+      }
+    }
+
+    return null;
   }
 
   /** All unique commands (aliases deduped). */
