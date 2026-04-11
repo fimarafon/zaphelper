@@ -63,23 +63,12 @@ async function bootstrap() {
   const commandList = buildCommandList({ taskService });
   const registry = new CommandRegistry(commandList);
 
-  const dispatcher = new CommandDispatcher(
-    prisma,
-    evolution,
-    registry,
-    scheduler,
-    selfIdentity,
-    config,
-    logger,
-  );
-
-  // Wire the dispatcher back into the task runner so runCommand actions work.
-  taskRunner.runInlineCommand = (input: string) => dispatcher.runInline(input);
-
   const ingest = new MessageIngest(prisma, selfIdentity, logger);
 
   // Incremental sync — safety net for the webhook. Pulls anything Evolution
-  // received but didn't deliver (e.g. during restarts / brief crashes).
+  // received but didn't deliver (e.g. during restarts / brief crashes). Also
+  // offers a synchronous `syncNowForCommand()` used by /status* commands so
+  // they never show stale data even if the webhook is milliseconds behind.
   const incrementalSync = new IncrementalSync(
     prisma,
     evolution,
@@ -87,6 +76,20 @@ async function bootstrap() {
     config,
     logger,
   );
+
+  const dispatcher = new CommandDispatcher(
+    prisma,
+    evolution,
+    registry,
+    scheduler,
+    selfIdentity,
+    config,
+    incrementalSync,
+    logger,
+  );
+
+  // Wire the dispatcher back into the task runner so runCommand actions work.
+  taskRunner.runInlineCommand = (input: string) => dispatcher.runInline(input);
 
   // --- Init async state before taking traffic ---
   await selfIdentity.init();
@@ -144,7 +147,61 @@ async function bootstrap() {
   registerAuthHook(app, config);
 
   // --- Routes ---
-  app.get("/health", async () => ({ ok: true, ts: new Date().toISOString() }));
+  // Deep healthcheck: checks DB round-trip + Evolution connectivity.
+  // Returns 503 if any critical dependency is unhealthy, so EasyPanel/Traefik
+  // can pull the container out of rotation and restart it.
+  app.get("/health", async (_req, reply) => {
+    const checks: Record<string, { ok: boolean; latencyMs?: number; error?: string }> = {};
+    let allOk = true;
+
+    // DB check
+    const dbStart = Date.now();
+    try {
+      await prisma.$queryRaw`SELECT 1`;
+      checks.db = { ok: true, latencyMs: Date.now() - dbStart };
+    } catch (err) {
+      checks.db = {
+        ok: false,
+        latencyMs: Date.now() - dbStart,
+        error: err instanceof Error ? err.message : String(err),
+      };
+      allOk = false;
+    }
+
+    // Evolution API check (doesn't have to be connected — just reachable)
+    const evoStart = Date.now();
+    try {
+      const state = await evolution.getConnectionState();
+      checks.evolution = {
+        ok: state !== "unknown",
+        latencyMs: Date.now() - evoStart,
+        ...(state === "unknown" ? { error: `state=${state}` } : {}),
+      };
+      if (state === "unknown") allOk = false;
+    } catch (err) {
+      checks.evolution = {
+        ok: false,
+        latencyMs: Date.now() - evoStart,
+        error: err instanceof Error ? err.message : String(err),
+      };
+      // Evolution unreachable is degraded but not fatal — we still serve the
+      // dashboard. Don't flip allOk to false on Evolution failure alone.
+    }
+
+    // Self identity — if we don't know the user's JID, commands won't work.
+    checks.selfIdentity = {
+      ok: selfIdentity.isKnown(),
+    };
+    // Not critical for / health probing — logs but doesn't fail.
+
+    return reply
+      .code(allOk ? 200 : 503)
+      .send({
+        ok: allOk,
+        ts: new Date().toISOString(),
+        checks,
+      });
+  });
 
   await app.register(webhookRoutes, { ingest, dispatcher, selfIdentity, prisma, config });
   await app.register(authRoutes, { config });
@@ -161,17 +218,45 @@ async function bootstrap() {
   });
 
   // --- Lifecycle ---
+  // Graceful shutdown: give Fastify up to 10 seconds to drain in-flight
+  // requests (including webhooks) before disconnecting Prisma. Without this,
+  // a SIGTERM during a deploy would hard-close active webhook connections,
+  // causing Evolution to give up on those messages (no retry).
+  //
+  // Process: 1) stop accepting new connections 2) let in-flight finish
+  // 3) stop services 4) disconnect DB 5) exit.
+  let shuttingDown = false;
   const shutdown = async (signal: string) => {
-    logger.info({ signal }, "Shutting down");
+    if (shuttingDown) return;
+    shuttingDown = true;
+    logger.info({ signal }, "Graceful shutdown initiated");
+
+    // Hard kill-switch — if we hang, force-exit after 15s.
+    const killSwitch = setTimeout(() => {
+      logger.error("Shutdown exceeded 15s, force-exiting");
+      process.exit(1);
+    }, 15_000);
+    killSwitch.unref();
+
     try {
+      // 1) Stop accepting new connections; wait for in-flight to finish.
+      // Fastify's close() awaits all handlers to return.
       await app.close();
+      logger.info("Fastify closed (in-flight drained)");
+
+      // 2) Stop background services.
       await scheduler.stop();
       await taskRunner.stop();
       incrementalSync.stop();
+      logger.info("Background services stopped");
+
+      // 3) Disconnect DB last.
       await prisma.$disconnect();
+      logger.info("Prisma disconnected");
     } catch (err) {
       logger.error({ err }, "Error during shutdown");
     }
+    clearTimeout(killSwitch);
     process.exit(0);
   };
   process.on("SIGINT", () => void shutdown("SIGINT"));

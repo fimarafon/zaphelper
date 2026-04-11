@@ -20,8 +20,23 @@ export async function buildStatusReply(
   ctx: CommandContext,
   window: StatusWindow,
 ): Promise<CommandResult> {
-  const { prisma, config, logger } = ctx;
+  const { prisma, config, logger, incrementalSync } = ctx;
   const groupFilter = config.BE_HOME_LEADS_GROUP_NAME;
+
+  // CRITICAL: force a fresh sync BEFORE querying the DB. This guarantees the
+  // result reflects every message Evolution has received, even if the webhook
+  // dropped some (restart, timeout, edit events, etc.). The sync is bounded
+  // at 10 seconds; if Evolution is slow, we fall back to whatever we have.
+  // This is what makes /status* commands trustworthy for real-time decisions.
+  try {
+    const syncResult = await incrementalSync.syncNowForCommand();
+    logger.debug(
+      { saved: syncResult.saved, durationMs: syncResult.durationMs, waited: syncResult.waited },
+      "On-demand sync before status query",
+    );
+  } catch (err) {
+    logger.warn({ err }, "On-demand sync failed, falling back to stored state");
+  }
 
   const messages = await prisma.message.findMany({
     where: {

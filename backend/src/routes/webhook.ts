@@ -2,6 +2,8 @@ import type { FastifyPluginAsync } from "fastify";
 import {
   evolutionWebhookSchema,
   isConnectionUpdate,
+  isMessagesDelete,
+  isMessagesUpdate,
   isMessagesUpsert,
 } from "../evolution/webhook-types.js";
 import type { CommandDispatcher } from "../services/command-dispatcher.js";
@@ -41,15 +43,22 @@ export const webhookRoutes: FastifyPluginAsync<WebhookDeps> = async (fastify, de
     const payload = parsed.data;
 
     try {
+      // Order matters: check specific events (update/delete) BEFORE upsert,
+      // because the payload shapes overlap — both have key+message fields
+      // and only the event name distinguishes them.
       if (isConnectionUpdate(payload)) {
         await handleConnectionUpdate(payload.data as Record<string, unknown>);
+      } else if (isMessagesUpdate(payload)) {
+        await handleMessagesUpdate(payload.data as Parameters<MessageIngest["applyUpdate"]>[0]);
+      } else if (isMessagesDelete(payload)) {
+        await handleMessagesDelete(payload.data as Parameters<MessageIngest["applyDelete"]>[0]);
       } else if (isMessagesUpsert(payload)) {
         await handleMessagesUpsert(payload.data as Parameters<MessageIngest["ingest"]>[0]);
       } else {
         fastify.log.debug({ event: payload.event }, "Unhandled webhook event");
       }
     } catch (err) {
-      fastify.log.error({ err }, "Webhook handler error");
+      fastify.log.error({ err, event: payload.event }, "Webhook handler error");
     }
 
     return reply.code(200).send({ ok: true });
@@ -107,5 +116,22 @@ export const webhookRoutes: FastifyPluginAsync<WebhookDeps> = async (fastify, de
         });
       });
     }
+  }
+
+  async function handleMessagesUpdate(
+    data: Parameters<MessageIngest["applyUpdate"]>[0],
+  ): Promise<void> {
+    const result = await ingest.applyUpdate(data);
+    fastify.log.info(
+      { updated: result.updated, inserted: result.inserted, notFound: result.notFound },
+      "Message edit applied",
+    );
+  }
+
+  async function handleMessagesDelete(
+    data: Parameters<MessageIngest["applyDelete"]>[0],
+  ): Promise<void> {
+    const result = await ingest.applyDelete(data);
+    fastify.log.info({ deleted: result.deleted }, "Message delete applied");
   }
 };

@@ -55,7 +55,12 @@ export class EvolutionClient {
         url: this.webhookUrl,
         byEvents: false,
         base64: false,
-        events: ["MESSAGES_UPSERT", "CONNECTION_UPDATE"],
+        events: [
+          "MESSAGES_UPSERT",
+          "MESSAGES_UPDATE",
+          "MESSAGES_DELETE",
+          "CONNECTION_UPDATE",
+        ],
       },
     });
   }
@@ -117,7 +122,12 @@ export class EvolutionClient {
           url: this.webhookUrl,
           byEvents: false,
           base64: false,
-          events: ["MESSAGES_UPSERT", "CONNECTION_UPDATE"],
+          events: [
+            "MESSAGES_UPSERT",
+            "MESSAGES_UPDATE",
+            "MESSAGES_DELETE",
+            "CONNECTION_UPDATE",
+          ],
         },
       },
     );

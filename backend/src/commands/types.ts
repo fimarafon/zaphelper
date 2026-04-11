@@ -2,6 +2,7 @@ import type { PrismaClient } from "@prisma/client";
 import type { Logger } from "pino";
 import type { AppConfig } from "../config.js";
 import type { EvolutionClient } from "../evolution/client.js";
+import type { IncrementalSync } from "../services/incremental-sync.js";
 import type { Scheduler } from "../services/scheduler.js";
 
 export interface CommandContext {
@@ -14,6 +15,13 @@ export interface CommandContext {
   prisma: PrismaClient;
   evolution: EvolutionClient;
   scheduler: Scheduler;
+  /**
+   * Safety-net sync service. Any status/audit command should call
+   * `incrementalSync.syncNowForCommand()` before querying the DB so the
+   * result reflects the latest state — independent of whether the webhook
+   * delivered recent messages or not.
+   */
+  incrementalSync: IncrementalSync;
   /** The user's own JID, e.g. "15551234567@s.whatsapp.net". */
   selfJid: string;
   /** The user's own phone, digits only. */

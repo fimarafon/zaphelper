@@ -2,6 +2,7 @@ import bcrypt from "bcryptjs";
 import type { FastifyPluginAsync } from "fastify";
 import type { AppConfig } from "../config.js";
 import { AUTH_COOKIE, requireAuth, signAuthToken } from "../middleware/auth.js";
+import { loginLimiter } from "../middleware/rate-limit.js";
 
 export interface AuthRoutesDeps {
   config: AppConfig;
@@ -11,6 +12,19 @@ export const authRoutes: FastifyPluginAsync<AuthRoutesDeps> = async (fastify, { 
   fastify.post<{ Body: { username: string; password: string } }>(
     "/api/auth/login",
     async (req, reply) => {
+      // Derive a limiter key from the client IP. Fastify's trustProxy option
+      // (enabled in server.ts) lets req.ip reflect the X-Forwarded-For header
+      // from nginx, so this is the real client IP and not the internal
+      // docker-bridge address.
+      const key = `login:${req.ip}`;
+      const limit = loginLimiter.hit(key);
+      if (!limit.ok) {
+        reply.header("Retry-After", String(limit.retryAfter ?? 60));
+        return reply.code(429).send({
+          error: `Too many login attempts. Try again in ${limit.retryAfter} seconds.`,
+        });
+      }
+
       const body = req.body;
       if (
         !body ||
@@ -28,6 +42,10 @@ export const authRoutes: FastifyPluginAsync<AuthRoutesDeps> = async (fastify, { 
       if (!ok) {
         return reply.code(401).send({ error: "Invalid credentials" });
       }
+
+      // Success — reset the limiter so a legitimate user who mistyped once
+      // doesn't eat their quota.
+      loginLimiter.reset(key);
 
       const token = signAuthToken(config, body.username);
       reply.setCookie(AUTH_COOKIE, token, {

@@ -4,6 +4,7 @@ import type { AppConfig } from "../config.js";
 import type { CommandRegistry } from "../commands/registry.js";
 import type { CommandContext } from "../commands/types.js";
 import type { EvolutionClient } from "../evolution/client.js";
+import type { IncrementalSync } from "./incremental-sync.js";
 import type { Scheduler } from "./scheduler.js";
 import type { SelfIdentity } from "./self-identity.js";
 import type { IngestedMessage } from "./message-ingest.js";
@@ -24,6 +25,7 @@ export class CommandDispatcher {
     private readonly scheduler: Scheduler,
     private readonly selfIdentity: SelfIdentity,
     private readonly config: AppConfig,
+    private readonly incrementalSync: IncrementalSync,
     logger: Logger,
   ) {
     this.logger = logger.child({ component: "dispatcher" });
@@ -84,6 +86,7 @@ export class CommandDispatcher {
       prisma: this.prisma,
       evolution: this.evolution,
       scheduler: this.scheduler,
+      incrementalSync: this.incrementalSync,
       selfJid,
       selfPhone,
       config: this.config,
@@ -184,6 +187,7 @@ export class CommandDispatcher {
       prisma: this.prisma,
       evolution: this.evolution,
       scheduler: this.scheduler,
+      incrementalSync: this.incrementalSync,
       selfJid,
       selfPhone,
       config: this.config,

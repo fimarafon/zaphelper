@@ -1,4 +1,5 @@
 import type { PrismaClient, ScheduledTask as DbScheduledTask } from "@prisma/client";
+import parser from "cron-parser";
 import cron, { type ScheduledTask as CronScheduledTask } from "node-cron";
 import type { Logger } from "pino";
 import type { ActionContext } from "../actions/types.js";
@@ -8,6 +9,19 @@ import type { EvolutionClient } from "../evolution/client.js";
 import type { SelfIdentity } from "./self-identity.js";
 
 const MAX_TIMEOUT_MS = 2 ** 31 - 1; // ~24.8 days
+
+/**
+ * A task is auto-disabled if it fails this many times in a row. Prevents
+ * a broken task (e.g. webhook URL that always 500s) from burning resources
+ * forever. User can re-enable manually from the dashboard.
+ */
+const AUTO_DISABLE_AFTER_FAILURES = 10;
+
+/**
+ * Per-task execution timeout. Protects against hanging fetches in webhook
+ * actions, infinite loops in bad runCommand payloads, etc.
+ */
+const TASK_EXECUTION_TIMEOUT_MS = 60_000;
 
 /**
  * Dispatches scheduled tasks (cron + one-shot) by running their action
@@ -57,9 +71,23 @@ export class ScheduledTaskRunner {
     let registered = 0;
     let immediate = 0;
     let deferred = 0;
+    let recovered = 0;
 
     for (const task of tasks) {
       try {
+        // Recovery: for cron tasks, if nextFireAt was in the past AND the gap
+        // is more than 2 minutes (to avoid firing a task that just ran), fire
+        // it immediately with a [missed] flag. This covers the case where the
+        // container was down across a scheduled fire time.
+        if (
+          task.cronExpression &&
+          task.nextFireAt &&
+          task.nextFireAt.getTime() < Date.now() - 2 * 60 * 1000
+        ) {
+          void this.fireTask(task.id, { missed: true });
+          recovered += 1;
+        }
+
         const result = this.register(task);
         if (result === "immediate") immediate += 1;
         else if (result === "deferred") deferred += 1;
@@ -80,7 +108,7 @@ export class ScheduledTaskRunner {
     );
 
     this.logger.info(
-      { total: tasks.length, registered, immediate, deferred },
+      { total: tasks.length, registered, immediate, deferred, recovered },
       "ScheduledTaskRunner started",
     );
   }
@@ -224,45 +252,92 @@ export class ScheduledTaskRunner {
       if (validator) {
         validator(task.actionPayload);
       }
-      const result = await action.execute(ctx, task.actionPayload as never);
+
+      // Execute with a hard timeout so hanging webhooks / runaway commands
+      // don't block the runner forever.
+      const result = await Promise.race([
+        action.execute(ctx, task.actionPayload as never),
+        new Promise<never>((_, reject) =>
+          setTimeout(
+            () => reject(new Error(`Task timed out after ${TASK_EXECUTION_TIMEOUT_MS / 1000}s`)),
+            TASK_EXECUTION_TIMEOUT_MS,
+          ),
+        ),
+      ]);
 
       const prefix = opts.missed ? "[missed run] " : "";
-      await this.prisma.scheduledTask.update({
+      const newFailureCount = result.success ? 0 : task.failureCount + 1;
+      const shouldAutoDisable =
+        newFailureCount >= AUTO_DISABLE_AFTER_FAILURES && task.cronExpression !== null;
+
+      const updated = await this.prisma.scheduledTask.update({
         where: { id: task.id },
         data: {
           lastFiredAt: startedAt,
           lastError: result.success ? null : (result.error ?? "unknown error"),
           lastResult: (prefix + result.output).slice(0, 500),
           runCount: { increment: 1 },
-          failureCount: result.success
-            ? task.failureCount
-            : task.failureCount + 1,
+          failureCount: newFailureCount,
           // For one-shot: auto-disable after firing.
+          // For cron: auto-disable after N consecutive failures.
           ...(task.fireAt && !task.cronExpression ? { enabled: false } : {}),
+          ...(shouldAutoDisable ? { enabled: false } : {}),
         },
       });
 
+      // Unregister cron job if auto-disabled.
+      if (shouldAutoDisable) {
+        this.unregister(task.id);
+        this.logger.warn(
+          { taskId: task.id, failureCount: newFailureCount },
+          `Task auto-disabled after ${AUTO_DISABLE_AFTER_FAILURES} consecutive failures`,
+        );
+        // Notify self-chat so the user knows a task died.
+        const selfPhone = this.selfIdentity.getPhone();
+        if (selfPhone) {
+          void this.evolution
+            .sendText(
+              selfPhone,
+              `⚠️ Scheduled task *${updated.name}* was auto-disabled after ${AUTO_DISABLE_AFTER_FAILURES} consecutive failures.\n\nLast error: ${updated.lastError}\n\nRe-enable from the dashboard once fixed.`,
+            )
+            .catch((e) => this.logger.warn({ e }, "Failed to notify self about auto-disable"));
+        }
+      }
+
       // Update nextFireAt for cron tasks.
-      if (task.cronExpression) {
+      if (task.cronExpression && !shouldAutoDisable) {
         void this.updateNextFireAt(task.id, task.cronExpression);
       }
 
       this.logger.info(
-        { taskId: task.id, success: result.success },
+        { taskId: task.id, success: result.success, failureCount: newFailureCount },
         "Task fired",
       );
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       this.logger.error({ err, taskId: task.id }, "Task execution threw");
+      const newFailureCount = task.failureCount + 1;
+      const shouldAutoDisable =
+        newFailureCount >= AUTO_DISABLE_AFTER_FAILURES && task.cronExpression !== null;
+
       await this.prisma.scheduledTask.update({
         where: { id: task.id },
         data: {
           lastFiredAt: startedAt,
           lastError: msg,
           runCount: { increment: 1 },
-          failureCount: { increment: 1 },
+          failureCount: newFailureCount,
+          ...(shouldAutoDisable ? { enabled: false } : {}),
         },
       });
+
+      if (shouldAutoDisable) {
+        this.unregister(task.id);
+        this.logger.warn(
+          { taskId: task.id },
+          `Task auto-disabled (caught exception path)`,
+        );
+      }
     }
   }
 
@@ -293,23 +368,22 @@ export class ScheduledTaskRunner {
   }
 
   /**
-   * Compute the next fire time for a cron expression and store it. Uses
-   * node-cron internals if available; falls back to a simple "next hour"
-   * estimate otherwise.
+   * Compute the accurate next fire time for a cron expression using
+   * cron-parser (which respects timezone).
    */
   private async updateNextFireAt(taskId: string, cronExpr: string): Promise<void> {
-    // node-cron doesn't expose a public getNext(), so we approximate:
-    // we return the current time + 1 hour as a best-effort next fire.
-    // The dashboard can recompute with a proper cron parser if needed.
     try {
-      const approx = new Date(Date.now() + 60 * 60 * 1000);
+      const interval = parser.parseExpression(cronExpr, {
+        tz: this.config.TZ,
+        currentDate: new Date(),
+      });
+      const next = interval.next().toDate();
       await this.prisma.scheduledTask.update({
         where: { id: taskId },
-        data: { nextFireAt: approx },
+        data: { nextFireAt: next },
       });
-    } catch {
-      // ignore — not critical
+    } catch (err) {
+      this.logger.debug({ err, taskId }, "updateNextFireAt failed");
     }
-    void cronExpr; // silence unused warning
   }
 }

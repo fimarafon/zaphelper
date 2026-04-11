@@ -82,7 +82,7 @@ export class MessageIngest {
       lidToPhone: Map<string, string>;
       phoneToName: Map<string, string>;
     },
-  ): Promise<{ saved: boolean; duplicate: boolean }> {
+  ): Promise<{ saved: boolean; duplicate: boolean; updated?: boolean }> {
     await this.ensureNameCache();
 
     const key = record.key as
@@ -169,8 +169,141 @@ export class MessageIngest {
         err instanceof Prisma.PrismaClientKnownRequestError &&
         err.code === "P2002"
       ) {
+        // Duplicate — but the Evolution record may reflect an EDIT that
+        // happened after our original insert (WhatsApp lets senders edit
+        // up to ~15 min). Compare content and upgrade if it changed.
+        // This catches the case where the webhook didn't deliver the edit
+        // event (e.g. during a restart).
+        try {
+          const existing = await this.prisma.message.findUnique({
+            where: { waMessageId: key.id },
+            select: { content: true, id: true },
+          });
+          if (
+            existing &&
+            content &&
+            content !== "[Unsupported message]" &&
+            existing.content !== content
+          ) {
+            await this.prisma.message.update({
+              where: { waMessageId: key.id },
+              data: {
+                content,
+                messageType,
+                senderName: senderName ?? undefined,
+                senderPhone: senderPhone ?? undefined,
+                rawMessage: record as unknown as Prisma.InputJsonValue,
+              },
+            });
+            this.logger.info(
+              { waMessageId: key.id, oldLen: existing.content.length, newLen: content.length },
+              "Detected edit via backfill/sync — updated existing row",
+            );
+            return { saved: false, duplicate: true, updated: true };
+          }
+        } catch (updateErr) {
+          this.logger.debug({ updateErr, waMessageId: key.id }, "Edit detection update failed");
+        }
         return { saved: false, duplicate: true };
       }
+      throw err;
+    }
+  }
+
+  /**
+   * Apply a message edit event. WhatsApp lets the sender edit a message
+   * they already sent (typically within ~15 minutes). Evolution fires a
+   * `messages.update` webhook event carrying the NEW content with the
+   * SAME key.id as the original. We locate our existing row by waMessageId
+   * and overwrite its content/rawMessage, preserving timestamp.
+   *
+   * If we don't have the original (e.g. it arrived during a restart and
+   * was never saved), we upsert: insert a fresh row with the update payload.
+   */
+  async applyUpdate(data: EvolutionMessagesUpsertData): Promise<{
+    updated: boolean;
+    inserted: boolean;
+    notFound: boolean;
+  }> {
+    const key = data.key;
+    if (!key?.id) return { updated: false, inserted: false, notFound: true };
+
+    const { content, messageType } = extractContent(data.message ?? {});
+
+    // Some Evolution builds send updates with an empty message payload
+    // (just the key + metadata). Skip if we have no content to apply —
+    // nothing to do.
+    if (!content || content === "[Unsupported message]") {
+      return { updated: false, inserted: false, notFound: false };
+    }
+
+    try {
+      const existing = await this.prisma.message.findUnique({
+        where: { waMessageId: key.id },
+      });
+
+      if (existing) {
+        await this.prisma.message.update({
+          where: { waMessageId: key.id },
+          data: {
+            content,
+            messageType,
+            // Keep the ORIGINAL rawMessage alongside the new one so we can
+            // debug: stick the update under a special key.
+            rawMessage: {
+              ...((existing.rawMessage ?? {}) as Record<string, unknown>),
+              _lastEdit: data as unknown as Prisma.InputJsonValue,
+              _editedAt: new Date().toISOString(),
+            } as unknown as Prisma.InputJsonValue,
+          },
+        });
+        this.logger.info(
+          { waMessageId: key.id, chatId: existing.chatId },
+          "Applied message edit",
+        );
+        return { updated: true, inserted: false, notFound: false };
+      }
+
+      // Didn't have the original — treat the update as a fresh insert.
+      // The ingest path handles dedupe + name resolution.
+      const result = await this.ingest(data);
+      return { updated: false, inserted: Boolean(result.saved), notFound: false };
+    } catch (err) {
+      this.logger.error({ err, waMessageId: key.id }, "applyUpdate failed");
+      throw err;
+    }
+  }
+
+  /**
+   * Mark a message as deleted. We don't remove the row — keeping the
+   * history is more useful than strict compliance. Content is replaced
+   * with a sentinel `[deleted]` value so lead parsing skips it naturally.
+   */
+  async applyDelete(data: EvolutionMessagesUpsertData): Promise<{ deleted: boolean }> {
+    const key = data.key;
+    if (!key?.id) return { deleted: false };
+
+    try {
+      const existing = await this.prisma.message.findUnique({
+        where: { waMessageId: key.id },
+      });
+      if (!existing) return { deleted: false };
+
+      await this.prisma.message.update({
+        where: { waMessageId: key.id },
+        data: {
+          content: "[deleted]",
+          messageType: "OTHER",
+          rawMessage: {
+            ...((existing.rawMessage ?? {}) as Record<string, unknown>),
+            _deletedAt: new Date().toISOString(),
+          } as unknown as Prisma.InputJsonValue,
+        },
+      });
+      this.logger.info({ waMessageId: key.id }, "Applied message delete");
+      return { deleted: true };
+    } catch (err) {
+      this.logger.error({ err, waMessageId: key.id }, "applyDelete failed");
       throw err;
     }
   }

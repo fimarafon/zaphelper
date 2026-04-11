@@ -21,7 +21,15 @@ export const auditCommand: Command = {
   description: "Show messages that were NOT counted as leads, for review.",
   usage: "/audit [date|range]",
   async execute(ctx) {
-    const { prisma, config, now } = ctx;
+    const { prisma, config, now, incrementalSync, logger } = ctx;
+
+    // Pull fresh data before reporting — same contract as /status*.
+    try {
+      await incrementalSync.syncNowForCommand();
+    } catch (err) {
+      logger.warn({ err }, "On-demand sync failed in /audit");
+    }
+
     const input = ctx.rawInput.trim();
 
     let start: Date;

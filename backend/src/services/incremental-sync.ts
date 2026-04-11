@@ -70,7 +70,7 @@ export class IncrementalSync {
    * Run a sync cycle. Wrapped in a lock to prevent overlapping runs if
    * a previous sync takes longer than the interval.
    */
-  async runSafely(trigger: "boot" | "cron" | "manual"): Promise<void> {
+  async runSafely(trigger: "boot" | "cron" | "manual" | "on-demand"): Promise<void> {
     if (this.running) {
       this.logger.debug("Sync already in progress, skipping");
       return;
@@ -78,7 +78,11 @@ export class IncrementalSync {
     this.running = true;
     const started = Date.now();
     try {
-      const result = await this.syncRecent();
+      // On-demand runs (before a /status command) are latency-sensitive —
+      // they only need to catch new messages, not rebuild the world, so we
+      // walk just the first page.
+      const maxPages = trigger === "on-demand" ? 2 : 10;
+      const result = await this.syncRecent(maxPages);
       this.logger.info(
         {
           trigger,
@@ -95,6 +99,64 @@ export class IncrementalSync {
   }
 
   /**
+   * Fast-path sync for use right before a /status command runs.
+   * - Only walks 2 pages (200 most recent Evolution records)
+   * - Skips the group/contact map rebuild if we have no new records
+   * - Hard timeout of 10 seconds so a slow Evolution doesn't block the command
+   * - Concurrent calls coalesce: if a sync is already running, callers wait
+   *   for it instead of starting a second one
+   *
+   * Returns when either (a) a fresh sync finished, or (b) timeout expired.
+   */
+  async syncNowForCommand(): Promise<{
+    saved: number;
+    updated: number;
+    durationMs: number;
+    waited: boolean;
+  }> {
+    const started = Date.now();
+
+    // If a sync is already running (e.g. the 5-min cron just fired), wait
+    // for it to finish instead of racing it.
+    if (this.running) {
+      const waitStart = Date.now();
+      while (this.running && Date.now() - waitStart < 10_000) {
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      return { saved: 0, updated: 0, durationMs: Date.now() - started, waited: true };
+    }
+
+    this.running = true;
+    try {
+      const syncPromise = this.syncRecent(2);
+      const timeoutPromise = new Promise<{ saved: 0; updated: 0 }>((resolve) =>
+        setTimeout(() => resolve({ saved: 0, updated: 0 }), 10_000),
+      );
+      const result = await Promise.race([syncPromise, timeoutPromise]);
+      this.logger.info(
+        {
+          trigger: "on-demand",
+          durationMs: Date.now() - started,
+          saved: result.saved,
+          updated: result.updated,
+        },
+        "On-demand sync complete",
+      );
+      return {
+        saved: result.saved,
+        updated: result.updated,
+        durationMs: Date.now() - started,
+        waited: false,
+      };
+    } catch (err) {
+      this.logger.warn({ err }, "On-demand sync failed");
+      return { saved: 0, updated: 0, durationMs: Date.now() - started, waited: false };
+    } finally {
+      this.running = false;
+    }
+  }
+
+  /**
    * Pull the N most recent pages from Evolution and ingest anything
    * we haven't seen. Uses the same ingestRaw path as the full backfill
    * but scoped to only recent messages.
@@ -102,6 +164,7 @@ export class IncrementalSync {
   private async syncRecent(maxPages = 10): Promise<{
     scanned: number;
     saved: number;
+    updated: number;
     duplicate: number;
   }> {
     // Build the resolution maps so group chatName gets populated for
@@ -139,6 +202,7 @@ export class IncrementalSync {
 
     let scanned = 0;
     let saved = 0;
+    let updated = 0;
     let duplicate = 0;
 
     // Evolution returns messages in newest-first order on page 1, so walking
@@ -148,14 +212,17 @@ export class IncrementalSync {
         const pageData = await this.evolution.fetchMessagesPage(page, 100);
         if (!pageData.records || pageData.records.length === 0) break;
 
-        let savedThisPage = 0;
+        let changesThisPage = 0;
         for (const record of pageData.records) {
           scanned += 1;
           try {
             const res = await this.ingest.ingestRaw(record, resolver);
             if (res.saved) {
               saved += 1;
-              savedThisPage += 1;
+              changesThisPage += 1;
+            } else if (res.updated) {
+              updated += 1;
+              changesThisPage += 1;
             } else if (res.duplicate) {
               duplicate += 1;
             }
@@ -164,9 +231,9 @@ export class IncrementalSync {
           }
         }
 
-        // Optimization: if a whole page had zero new messages, we've caught up.
-        // Stop walking further pages — older messages are already in our DB.
-        if (savedThisPage === 0 && page >= 2) break;
+        // Optimization: if a whole page had zero new/updated messages, we've
+        // caught up. Stop walking further pages.
+        if (changesThisPage === 0 && page >= 2) break;
 
         if (page >= pageData.pages) break;
       } catch (err) {
@@ -175,6 +242,6 @@ export class IncrementalSync {
       }
     }
 
-    return { scanned, saved, duplicate };
+    return { scanned, saved, updated, duplicate };
   }
 }

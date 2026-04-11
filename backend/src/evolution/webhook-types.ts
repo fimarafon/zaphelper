@@ -86,7 +86,48 @@ export function isMessagesUpsert(
   if (!data) return false;
   const hasKey = typeof data.key === "object" && data.key !== null && "id" in (data.key as object);
   const ev = payload.event?.toLowerCase();
-  return hasKey && (!ev || ev.includes("messages.upsert") || ev.includes("messages_upsert"));
+  // Upsert event or unlabeled event with a key — treat as upsert.
+  return (
+    hasKey &&
+    (!ev ||
+      ev.includes("messages.upsert") ||
+      ev.includes("messages_upsert")) &&
+    !ev?.includes("update") &&
+    !ev?.includes("delete")
+  );
+}
+
+/**
+ * A message edit event. WhatsApp fires this when a sender edits a message
+ * they previously sent (to correct a typo, add info, etc.). Critical for
+ * lead tracking — someone may post an incomplete lead, then edit to add
+ * the source or project details.
+ *
+ * Shape varies across Evolution versions; we duck-type on `key.id` being
+ * present and the event name containing "update".
+ */
+export function isMessagesUpdate(
+  payload: EvolutionWebhookPayload,
+): payload is EvolutionWebhookPayload & { data: EvolutionMessagesUpsertData } {
+  const data = payload.data as Record<string, unknown> | undefined;
+  if (!data) return false;
+  const hasKey = typeof data.key === "object" && data.key !== null && "id" in (data.key as object);
+  const ev = payload.event?.toLowerCase() ?? "";
+  return hasKey && (ev.includes("messages.update") || ev.includes("messages_update"));
+}
+
+/**
+ * A message deletion event. We mark the message as deleted (but don't
+ * physically remove it — keeping history is more useful than strict DSR).
+ */
+export function isMessagesDelete(
+  payload: EvolutionWebhookPayload,
+): payload is EvolutionWebhookPayload & { data: EvolutionMessagesUpsertData } {
+  const data = payload.data as Record<string, unknown> | undefined;
+  if (!data) return false;
+  const hasKey = typeof data.key === "object" && data.key !== null && "id" in (data.key as object);
+  const ev = payload.event?.toLowerCase() ?? "";
+  return hasKey && (ev.includes("messages.delete") || ev.includes("messages_delete"));
 }
 
 export function isConnectionUpdate(
