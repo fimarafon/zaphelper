@@ -37,6 +37,10 @@ const RESOLVER_TTL_MS = 10 * 60 * 1000; // 10 minutes
 export class IncrementalSync {
   private cronJob: ScheduledTask | null = null;
   private running = false;
+  /** Separate mutex for fast chat syncs so they don't block on general sync. */
+  private fastSyncInFlight = 0;
+  /** Separate mutex so the resolver is rebuilt at most once concurrently. */
+  private rebuildingResolver = false;
   private readonly logger: Logger;
 
   /**
@@ -94,10 +98,11 @@ export class IncrementalSync {
     this.running = true;
     const started = Date.now();
     try {
-      // On-demand runs (before a /status command) are latency-sensitive —
-      // they only need to catch new messages, not rebuild the world, so we
-      // walk just the first page.
-      const maxPages = trigger === "on-demand" ? 2 : 10;
+      // Cron runs walk 3 pages (300 newest records) — enough to catch any
+      // gap from webhook drops during a restart, but short enough to
+      // complete in under 1s once the DB is caught up (the page-level
+      // short-circuit stops as soon as a page has zero new records).
+      const maxPages = trigger === "on-demand" ? 2 : 3;
       const result = await this.syncRecent(maxPages);
       this.logger.info(
         {
@@ -145,9 +150,47 @@ export class IncrementalSync {
   }> {
     const started = Date.now();
 
+    // FAST PATH: scoped chat sync. Never blocks on the general sync lock —
+    // they hit different data paths and Postgres uniqueness handles any
+    // rare race. Capped at 3 seconds so a slow Evolution never hurts UX.
+    if (chatJid) {
+      this.fastSyncInFlight += 1;
+      try {
+        const result = await Promise.race([
+          this.fastChatSync(chatJid),
+          new Promise<{ saved: 0; updated: 0; duplicate: 0 }>((resolve) =>
+            setTimeout(() => resolve({ saved: 0, updated: 0, duplicate: 0 }), 3_000),
+          ),
+        ]);
+        this.logger.info(
+          {
+            trigger: "on-demand-fast",
+            chatJid,
+            durationMs: Date.now() - started,
+            saved: result.saved,
+            updated: result.updated,
+          },
+          "Fast chat sync complete",
+        );
+        return {
+          saved: result.saved,
+          updated: result.updated,
+          durationMs: Date.now() - started,
+          waited: false,
+        };
+      } catch (err) {
+        this.logger.warn({ err, chatJid }, "Fast chat sync failed");
+        return { saved: 0, updated: 0, durationMs: Date.now() - started, waited: false };
+      } finally {
+        this.fastSyncInFlight -= 1;
+      }
+    }
+
+    // SLOW PATH: general sync (walks 2 pages of all chats). Coalesces with
+    // running background syncs to prevent resource contention.
     if (this.running) {
       const waitStart = Date.now();
-      while (this.running && Date.now() - waitStart < 5_000) {
+      while (this.running && Date.now() - waitStart < 3_000) {
         await new Promise((r) => setTimeout(r, 50));
       }
       return { saved: 0, updated: 0, durationMs: Date.now() - started, waited: true };
@@ -155,23 +198,20 @@ export class IncrementalSync {
 
     this.running = true;
     try {
-      const syncPromise = chatJid
-        ? this.fastChatSync(chatJid)
-        : this.syncRecent(2);
-      // Hard cap 8s so a slow Evolution never blocks the command.
-      const timeoutPromise = new Promise<{ saved: 0; updated: 0 }>((resolve) =>
-        setTimeout(() => resolve({ saved: 0, updated: 0 }), 8_000),
-      );
-      const result = await Promise.race([syncPromise, timeoutPromise]);
+      const result = await Promise.race([
+        this.syncRecent(2),
+        new Promise<{ saved: 0; updated: 0; scanned: 0; duplicate: 0 }>((resolve) =>
+          setTimeout(() => resolve({ saved: 0, updated: 0, scanned: 0, duplicate: 0 }), 5_000),
+        ),
+      ]);
       this.logger.info(
         {
-          trigger: "on-demand",
-          chatJid: chatJid ?? null,
+          trigger: "on-demand-general",
           durationMs: Date.now() - started,
           saved: result.saved,
           updated: result.updated,
         },
-        "On-demand sync complete",
+        "General on-demand sync complete",
       );
       return {
         saved: result.saved,
@@ -180,7 +220,7 @@ export class IncrementalSync {
         waited: false,
       };
     } catch (err) {
-      this.logger.warn({ err, chatJid }, "On-demand sync failed");
+      this.logger.warn({ err }, "On-demand sync failed");
       return { saved: 0, updated: 0, durationMs: Date.now() - started, waited: false };
     } finally {
       this.running = false;
@@ -224,7 +264,9 @@ export class IncrementalSync {
       existing.map((e) => [e.waMessageId, e.content] as const),
     );
 
-    const resolver = await this.getResolver();
+    // Non-blocking resolver — returns stale or empty cache instantly.
+    // Background rebuild is kicked off if the cache is stale.
+    const resolver = this.getResolverFast();
 
     let saved = 0;
     let updated = 0;
@@ -279,6 +321,50 @@ export class IncrementalSync {
    * we haven't seen. Uses the same ingestRaw path as the full backfill
    * but scoped to only recent messages.
    */
+  /**
+   * Returns a resolver immediately, WITHOUT blocking to rebuild.
+   *
+   * - If the cache is fresh, returns it directly.
+   * - If the cache exists but is stale, returns the stale copy AND
+   *   triggers a background rebuild (fire-and-forget). The next call
+   *   will get the fresh copy once the background rebuild finishes.
+   * - If the cache is completely missing (cold start), returns an empty
+   *   resolver so the caller can still do something useful, and triggers
+   *   a background rebuild.
+   *
+   * This is the right function for hot paths (`fastChatSync`) — we never
+   * want to block the user's /status command on a resolver rebuild.
+   */
+  private getResolverFast(): ResolverCache {
+    if (this.resolverCache) {
+      if (Date.now() - this.resolverCache.builtAt > RESOLVER_TTL_MS) {
+        // Stale — kick off background rebuild, return stale copy.
+        void this.rebuildResolverInBackground();
+      }
+      return this.resolverCache;
+    }
+    // Cold cache — return empty, rebuild in background.
+    void this.rebuildResolverInBackground();
+    return {
+      chatNameMap: new Map(),
+      lidToPhone: new Map(),
+      phoneToName: new Map(),
+      builtAt: 0,
+    };
+  }
+
+  private async rebuildResolverInBackground(): Promise<void> {
+    if (this.rebuildingResolver) return;
+    this.rebuildingResolver = true;
+    try {
+      await this.getResolver(true);
+    } catch (err) {
+      this.logger.debug({ err }, "Background resolver rebuild failed");
+    } finally {
+      this.rebuildingResolver = false;
+    }
+  }
+
   /**
    * Returns the resolver maps, rebuilding them if the cache is missing
    * or stale. Rebuilding does 2 Evolution API calls (~800ms total) and
