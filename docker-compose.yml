@@ -1,0 +1,71 @@
+# zaphelper — personal WhatsApp assistant
+#
+# Three services:
+#   - postgres: database (persistent volume)
+#   - backend:  Fastify + Prisma (webhook, commands, scheduler)
+#   - web:      nginx serving the Vite SPA + proxying /api and /webhook
+#
+# EasyPanel users: paste this file into a new Compose project, then set
+# environment variables in the EasyPanel UI. Only the `web` service needs
+# public exposure — the backend is reached via the internal docker network.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-zaphelper}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-zaphelper}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-zaphelper} -d ${POSTGRES_DB:-zaphelper}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      HOST: 0.0.0.0
+      DATABASE_URL: postgresql://${POSTGRES_USER:-zaphelper}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-zaphelper}
+      EVOLUTION_API_URL: ${EVOLUTION_API_URL}
+      EVOLUTION_API_KEY: ${EVOLUTION_API_KEY}
+      EVOLUTION_INSTANCE_NAME: ${EVOLUTION_INSTANCE_NAME:-zaphelper-main}
+      WEBHOOK_URL: ${WEBHOOK_URL}
+      ADMIN_USER: ${ADMIN_USER:-admin}
+      ADMIN_PASSWORD_HASH: ${ADMIN_PASSWORD_HASH}
+      JWT_SECRET: ${JWT_SECRET}
+      BE_HOME_LEADS_GROUP_NAME: ${BE_HOME_LEADS_GROUP_NAME:-Be Home Leads Scheduled}
+      SELF_PHONE_NUMBER: ${SELF_PHONE_NUMBER:-}
+      TZ: ${TZ:-America/New_York}
+      COOKIE_SECURE: ${COOKIE_SECURE:-true}
+    # Expose the backend port locally only (via the docker network) —
+    # the web service is the only public surface. Uncomment if you want
+    # to hit the backend directly for debugging.
+    # ports:
+    #   - "3000:3000"
+    expose:
+      - "3000"
+
+  web:
+    build:
+      context: .
+      dockerfile: web/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - "${WEB_PORT:-8080}:80"
+
+volumes:
+  postgres-data:

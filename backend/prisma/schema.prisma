@@ -1,0 +1,118 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// Every message Evolution reports (incoming + outgoing, DMs + groups).
+model Message {
+  id          String      @id @default(cuid())
+  waMessageId String      @unique
+  chatId      String
+  chatName    String?
+  senderPhone String?
+  senderName  String?
+  content     String
+  rawMessage  Json
+  messageType MessageType
+  isGroup     Boolean     @default(false)
+  isFromMe    Boolean     @default(false)
+  isSelfChat  Boolean     @default(false)
+  timestamp   DateTime
+  createdAt   DateTime    @default(now())
+
+  commandLogs CommandLog[]
+
+  @@index([chatId, timestamp])
+  @@index([isSelfChat, isFromMe, timestamp])
+  @@index([chatName])
+  @@index([timestamp])
+}
+
+enum MessageType {
+  TEXT
+  IMAGE
+  AUDIO
+  VIDEO
+  DOCUMENT
+  STICKER
+  CONTACT
+  LOCATION
+  OTHER
+}
+
+// Reminders scheduled by /reminder command; fired by the scheduler service.
+model Reminder {
+  id           String         @id @default(cuid())
+  scheduledAt  DateTime
+  message      String
+  status       ReminderStatus @default(PENDING)
+  createdByCmd String?
+  createdAt    DateTime       @default(now())
+  sentAt       DateTime?
+  error        String?
+
+  @@index([status, scheduledAt])
+}
+
+enum ReminderStatus {
+  PENDING
+  SENT
+  MISSED
+  CANCELLED
+  FAILED
+}
+
+// Audit log of every command execution.
+model CommandLog {
+  id         String        @id @default(cuid())
+  command    String
+  args       String?
+  rawInput   String
+  messageId  String?
+  message    Message?      @relation(fields: [messageId], references: [id], onDelete: SetNull)
+  output     String?
+  status     CommandStatus
+  error      String?
+  executedAt DateTime      @default(now())
+  durationMs Int?
+
+  @@index([executedAt])
+  @@index([command, executedAt])
+}
+
+enum CommandStatus {
+  SUCCESS
+  FAILURE
+  NOT_FOUND
+}
+
+// Key/value store for runtime config (e.g., detected self JID).
+model Config {
+  key       String   @id
+  value     String
+  updatedAt DateTime @updatedAt
+}
+
+// The single WhatsApp instance this app manages.
+model Instance {
+  id              String         @id @default(cuid())
+  name            String         @unique
+  phoneNumber     String?
+  ownerJid        String?
+  status          InstanceStatus @default(DISCONNECTED)
+  lastConnectedAt DateTime?
+  lastSeenAt      DateTime?
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+}
+
+enum InstanceStatus {
+  DISCONNECTED
+  CONNECTING
+  CONNECTED
+  ERROR
+}

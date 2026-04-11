@@ -1,0 +1,24 @@
+{
+  "name": "zaphelper",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Personal WhatsApp assistant with self-chat commands, reminders, and lead tracking",
+  "workspaces": [
+    "backend",
+    "web"
+  ],
+  "scripts": {
+    "dev:backend": "npm run dev --workspace=backend",
+    "dev:web": "npm run dev --workspace=web",
+    "dev": "npm-run-all -p dev:backend dev:web",
+    "build": "npm-run-all -s build:backend build:web",
+    "build:backend": "npm run build --workspace=backend",
+    "build:web": "npm run build --workspace=web"
+  },
+  "devDependencies": {
+    "npm-run-all": "^4.1.5"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}
