@@ -421,36 +421,40 @@ export const instanceRoutes: FastifyPluginAsync<InstanceRoutesDeps> = async (
         const realPhoneJid = lidToPhone.get(jid);
         const realPhoneDigits = realPhoneJid?.replace(/@.*$/, "") ?? null;
 
-        // Persist in Config so future webhook ingests reuse it.
-        // Key by the real phone if we have it, else by the JID digits.
-        const configKeyPhone = realPhoneDigits ?? jidDigits;
-        await prisma.config.upsert({
-          where: { key: `name:${configKeyPhone}` },
-          create: { key: `name:${configKeyPhone}`, value: name },
-          update: { value: name },
-        });
-        configWrites += 1;
+        // Persist in Config keyed by BOTH the LID digits and the real phone
+        // so future ingests resolve regardless of which the webhook delivers.
+        const configKeys = new Set<string>();
+        configKeys.add(`name:${jidDigits}`);
+        if (realPhoneDigits) configKeys.add(`name:${realPhoneDigits}`);
+        for (const key of configKeys) {
+          await prisma.config.upsert({
+            where: { key },
+            create: { key, value: name },
+            update: { value: name },
+          });
+          configWrites += 1;
+        }
 
-        // Update all existing messages where senderPhone = LID digits.
-        const resLid = await prisma.message.updateMany({
-          where: { senderPhone: jidDigits },
+        // Update existing rows by BOTH possible senderPhone values.
+        // This catches rows from before the retrofit (still have LID digits)
+        // AND rows already rewritten to the real phone but missing the name.
+        const phonesToMatch = [jidDigits];
+        if (realPhoneDigits && realPhoneDigits !== jidDigits) {
+          phonesToMatch.push(realPhoneDigits);
+        }
+
+        const resUpdate = await prisma.message.updateMany({
+          where: { senderPhone: { in: phonesToMatch } },
           data: {
             senderName: name,
+            // Only rewrite senderPhone to the real phone if we have one.
+            // Prisma updateMany lets us unconditionally set — safe since we're
+            // already scoped to rows that match either value.
             ...(realPhoneDigits ? { senderPhone: realPhoneDigits } : {}),
           },
         });
-        rowsUpdated += resLid.count;
-        if (realPhoneDigits) phoneUpdated += resLid.count;
-
-        // Also update rows already rewritten to the real phone (case: previous
-        // backfill run replaced LID -> phone but didn't have the name yet).
-        if (realPhoneDigits && realPhoneDigits !== jidDigits) {
-          const resPhone = await prisma.message.updateMany({
-            where: { senderPhone: realPhoneDigits, senderName: null },
-            data: { senderName: name },
-          });
-          rowsUpdated += resPhone.count;
-        }
+        rowsUpdated += resUpdate.count;
+        if (realPhoneDigits) phoneUpdated += resUpdate.count;
       }
 
       // Refresh the in-memory name cache so webhook ingests see the new mappings.
