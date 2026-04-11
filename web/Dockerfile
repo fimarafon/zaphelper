@@ -1,7 +1,11 @@
 # syntax=docker/dockerfile:1.7
 # Build the Vite SPA and serve it with nginx.
-# nginx also reverse-proxies /api and /webhook to the backend container,
-# so the browser sees a single origin (cookies Just Work).
+#
+# nginx:alpine automatically runs envsubst on files in /etc/nginx/templates/
+# at container startup, producing the final config in /etc/nginx/conf.d/.
+# We use this to inject BACKEND_HOST and BACKEND_PORT at runtime so the same
+# image works in docker-compose (backend:3000) AND EasyPanel
+# (studio_zaphelper-backend:3000).
 
 # -------- build --------
 FROM node:20-alpine AS build
@@ -20,8 +24,12 @@ RUN cd web && npm run build
 
 # -------- runtime --------
 FROM nginx:1.27-alpine AS runtime
-COPY web/nginx.conf /etc/nginx/conf.d/default.conf
+
+COPY web/nginx.conf.template /etc/nginx/templates/default.conf.template
 COPY --from=build /app/web/dist /usr/share/nginx/html
 
+# Only substitute vars starting with BACKEND_ so nginx's own $host, $uri etc.
+# aren't touched (those use $VAR syntax, but we set the filter just in case).
+ENV NGINX_ENVSUBST_FILTER='^BACKEND_'
+
 EXPOSE 80
-CMD ["nginx", "-g", "daemon off;"]

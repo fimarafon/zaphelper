@@ -10,12 +10,14 @@ server {
     add_header X-Content-Type-Options "nosniff" always;
     add_header Referrer-Policy "strict-origin-when-cross-origin" always;
 
-    # Increase max body for webhook payloads (Evolution can push media data).
     client_max_body_size 10M;
 
-    # Proxy API requests to the backend service.
+    # BACKEND_HOST is injected at container start via envsubst.
+    # Local docker-compose:     backend:3000
+    # EasyPanel (project=studio): studio_zaphelper-backend:3000
+
     location /api/ {
-        proxy_pass http://backend:3000;
+        proxy_pass http://${BACKEND_HOST}:${BACKEND_PORT};
         proxy_http_version 1.1;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
@@ -24,9 +26,8 @@ server {
         proxy_read_timeout 60s;
     }
 
-    # Proxy webhook endpoint — Evolution API hits this one.
     location /webhook {
-        proxy_pass http://backend:3000/webhook;
+        proxy_pass http://${BACKEND_HOST}:${BACKEND_PORT}/webhook;
         proxy_http_version 1.1;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
@@ -35,19 +36,16 @@ server {
         proxy_read_timeout 30s;
     }
 
-    # Proxy health check too — handy for debugging.
     location = /health {
-        proxy_pass http://backend:3000/health;
+        proxy_pass http://${BACKEND_HOST}:${BACKEND_PORT}/health;
     }
 
-    # Cache built assets aggressively (Vite fingerprints them).
     location /assets/ {
         expires 1y;
         add_header Cache-Control "public, immutable";
         try_files $uri =404;
     }
 
-    # SPA fallback — everything else serves index.html.
     location / {
         try_files $uri $uri/ /index.html;
     }

@@ -64,6 +64,10 @@ services:
     restart: unless-stopped
     depends_on:
       - backend
+    environment:
+      # nginx envsubst will inject these into nginx.conf.template at startup.
+      BACKEND_HOST: backend
+      BACKEND_PORT: "3000"
     ports:
       - "${WEB_PORT:-8080}:80"
 
