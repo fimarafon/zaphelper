@@ -191,6 +191,28 @@ export const instanceRoutes: FastifyPluginAsync<InstanceRoutesDeps> = async (
         fastify.log.warn({ err }, "Backfill: could not load chats");
       }
 
+      // Step 1b: for participants whose phone number isn't in our contacts
+      // table, ask WhatsApp directly via fetchProfile. This is slow (one HTTP
+      // call per unknown participant) but runs once per backfill.
+      let profileLookups = 0;
+      const unknownPhones = new Set<string>();
+      for (const phoneJid of lidToPhone.values()) {
+        if (!phoneToName.has(phoneJid)) unknownPhones.add(phoneJid);
+      }
+      fastify.log.info(
+        { unknown: unknownPhones.size },
+        "Backfill: unresolved participants, will query fetchProfile",
+      );
+      for (const phoneJid of unknownPhones) {
+        const phoneDigits = phoneJid.replace(/@.*$/, "");
+        const profile = await evolution.fetchProfile(phoneDigits);
+        if (profile?.name && !/^\d+$/.test(profile.name)) {
+          phoneToName.set(phoneJid, profile.name);
+          profileLookups += 1;
+        }
+      }
+      fastify.log.info({ profileLookups }, "Backfill: profile lookups done");
+
       const resolver = { chatNameMap, lidToPhone, phoneToName };
 
       // Step 2: paginate through messages.
@@ -305,6 +327,12 @@ export const instanceRoutes: FastifyPluginAsync<InstanceRoutesDeps> = async (
         groups: chatNameMap.size,
         lidMappings: lidToPhone.size,
         contactNames: phoneToName.size,
+        profileLookups,
+        retrofit: {
+          chatNameUpdated,
+          senderNameUpdated,
+          senderPhoneUpdated,
+        },
         error: lastError,
       };
     },

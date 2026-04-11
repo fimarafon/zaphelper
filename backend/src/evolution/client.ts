@@ -300,6 +300,25 @@ export class EvolutionClient {
   }
 
   /**
+   * Queries WhatsApp directly for a number's public profile (name, pic, etc.).
+   * This is our last-resort resolver — used for group participants whose name
+   * isn't in the local contacts table. Accepts a phone number (digits).
+   */
+  async fetchProfile(phone: string): Promise<{ name: string | null } | null> {
+    try {
+      const res = await this.request<{ name?: string }>(
+        "POST",
+        `/chat/fetchProfile/${encodeURIComponent(this.instanceName)}`,
+        { number: phone.replace(/\D/g, "") },
+      );
+      return { name: res?.name ?? null };
+    } catch (err) {
+      this.logger.debug({ err, phone }, "fetchProfile failed");
+      return null;
+    }
+  }
+
+  /**
    * Fetches one page of messages from Evolution's database.
    * Evolution's /chat/findMessages returns { messages: { total, pages, currentPage, records } }.
    */
