@@ -79,6 +79,25 @@ async function bootstrap() {
     trustProxy: true,
   });
 
+  // Accept empty JSON bodies on POST — browsers often send
+  // `Content-Type: application/json` with no body when fetching with
+  // `method: "POST"` and no payload.
+  app.addContentTypeParser(
+    "application/json",
+    { parseAs: "string" },
+    (_req, body, done) => {
+      if (body === "" || body == null) {
+        done(null, {});
+        return;
+      }
+      try {
+        done(null, JSON.parse(body as string));
+      } catch (err) {
+        done(err as Error, undefined);
+      }
+    },
+  );
+
   await app.register(fastifyCookie, { secret: config.JWT_SECRET });
   await app.register(fastifyCors, {
     origin: true,
