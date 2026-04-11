@@ -12,6 +12,73 @@ export interface StatusWindow {
 }
 
 /**
+ * In-memory cache: group name → chatId. Persists for the lifetime of the
+ * process. Looked up via three strategies in order:
+ *   1. Any existing Message row whose chatName matches the filter
+ *   2. Evolution's /group/fetchAllGroups endpoint (by subject match)
+ *   3. Cache miss — fall back to chatName filter (imperfect but better than nothing)
+ *
+ * Cached indefinitely — group renames are rare, and on rename we'd just
+ * need to restart the backend (or we can build invalidation later).
+ */
+const groupIdCache = new Map<string, string | null>();
+
+/**
+ * Resolve a group display name ("Be Home Leads Scheduled") to its chatId
+ * ("120363396996770368"). Caches the result indefinitely.
+ *
+ * Strategy, fastest path first:
+ *   1. In-memory cache
+ *   2. Find any Message row whose chatName case-insensitively contains the filter
+ *   3. Query Evolution /group/fetchAllGroups and look for subject match
+ *
+ * Returns null if no match is found; callers should fall back to chatName.
+ */
+async function resolveGroupChatId(
+  ctx: CommandContext,
+  filter: string,
+): Promise<string | null> {
+  if (groupIdCache.has(filter)) {
+    return groupIdCache.get(filter) ?? null;
+  }
+
+  // Strategy 2: find it via an existing Message row with chatName set
+  try {
+    const sample = await ctx.prisma.message.findFirst({
+      where: {
+        isGroup: true,
+        chatName: { contains: filter, mode: "insensitive" },
+      },
+      select: { chatId: true },
+    });
+    if (sample?.chatId) {
+      groupIdCache.set(filter, sample.chatId);
+      return sample.chatId;
+    }
+  } catch {
+    // ignore
+  }
+
+  // Strategy 3: ask Evolution directly
+  try {
+    const groups = await ctx.evolution.fetchAllGroups(false);
+    const lowerFilter = filter.toLowerCase();
+    const match = groups.find((g) => g.subject.toLowerCase().includes(lowerFilter));
+    if (match) {
+      // Strip the @g.us suffix to match our chatId convention
+      const chatId = match.id.replace(/@.*$/, "");
+      groupIdCache.set(filter, chatId);
+      return chatId;
+    }
+  } catch (err) {
+    ctx.logger.warn({ err }, "resolveGroupChatId: fetchAllGroups failed");
+  }
+
+  groupIdCache.set(filter, null);
+  return null;
+}
+
+/**
  * Shared implementation for /statustoday and /statusweek — queries the lead
  * group messages in the time window, parses each, aggregates by poster and
  * source, and returns a formatted reply.
@@ -20,7 +87,7 @@ export async function buildStatusReply(
   ctx: CommandContext,
   window: StatusWindow,
 ): Promise<CommandResult> {
-  const { prisma, config, logger, incrementalSync } = ctx;
+  const { prisma, evolution, config, logger, incrementalSync } = ctx;
   const groupFilter = config.BE_HOME_LEADS_GROUP_NAME;
 
   // CRITICAL: force a fresh sync BEFORE querying the DB. This guarantees the
@@ -31,22 +98,52 @@ export async function buildStatusReply(
   try {
     const syncResult = await incrementalSync.syncNowForCommand();
     logger.debug(
-      { saved: syncResult.saved, durationMs: syncResult.durationMs, waited: syncResult.waited },
+      {
+        saved: syncResult.saved,
+        updated: syncResult.updated,
+        durationMs: syncResult.durationMs,
+        waited: syncResult.waited,
+      },
       "On-demand sync before status query",
     );
   } catch (err) {
     logger.warn({ err }, "On-demand sync failed, falling back to stored state");
   }
 
+  // Resolve the target group's chatId. Filtering by chatId is the reliable
+  // path — chatName filtering misses rows where chatName is null (which
+  // happens when a webhook delivers a group message without groupMetadata).
+  const chatId = await resolveGroupChatId(ctx, groupFilter);
+  if (chatId) {
+    // Opportunistic retrofit: backfill chatName on rows that have the right
+    // chatId but null chatName, so the dashboard Messages view displays the
+    // group name too. Fast (indexed update), runs silently.
+    try {
+      await prisma.message.updateMany({
+        where: { chatId, chatName: null, isGroup: true },
+        data: { chatName: groupFilter },
+      });
+    } catch (err) {
+      logger.debug({ err }, "chatName retrofit failed");
+    }
+  }
+
   const messages = await prisma.message.findMany({
     where: {
       isGroup: true,
-      chatName: { contains: groupFilter, mode: "insensitive" },
+      ...(chatId
+        ? { chatId }
+        : { chatName: { contains: groupFilter, mode: "insensitive" } }),
       timestamp: { gte: window.start, lte: window.end },
       messageType: "TEXT",
     },
     orderBy: { timestamp: "asc" },
   });
+
+  // Evolution webhook might deliver messages with chatName: null for groups.
+  // The sync might not always run the fetchAllGroups call first. Ensure we
+  // have `evolution` available here in case we need to resolve by subject.
+  void evolution;
 
   logger.debug(
     { count: messages.length, groupFilter, from: window.start, to: window.end },

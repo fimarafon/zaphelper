@@ -57,10 +57,37 @@ export const auditCommand: Command = {
       label = range.label;
     }
 
+    // Same chatId-first strategy as buildStatusReply so we catch rows with
+    // null chatName too. Inline here because audit.command.ts lives outside
+    // status-shared.ts and we want to keep its imports minimal.
+    let targetChatId: string | null = null;
+    try {
+      const sample = await prisma.message.findFirst({
+        where: {
+          isGroup: true,
+          chatName: {
+            contains: config.BE_HOME_LEADS_GROUP_NAME,
+            mode: "insensitive",
+          },
+        },
+        select: { chatId: true },
+      });
+      targetChatId = sample?.chatId ?? null;
+    } catch {
+      // fall through
+    }
+
     const messages = await prisma.message.findMany({
       where: {
         isGroup: true,
-        chatName: { contains: config.BE_HOME_LEADS_GROUP_NAME, mode: "insensitive" },
+        ...(targetChatId
+          ? { chatId: targetChatId }
+          : {
+              chatName: {
+                contains: config.BE_HOME_LEADS_GROUP_NAME,
+                mode: "insensitive",
+              },
+            }),
         timestamp: { gte: start, lte: end },
         messageType: "TEXT",
       },
