@@ -290,37 +290,42 @@ export const instanceRoutes: FastifyPluginAsync<InstanceRoutesDeps> = async (
         chatNameUpdated += res.count;
       }
 
-      // Build a combined LID -> displayName map to retrofit senderName.
-      const lidToName = new Map<string, string>();
+      // Two separate retrofits:
+      //   A) LID -> real phone number (applies to ALL LIDs we have a mapping for,
+      //      regardless of whether we have a name)
+      //   B) phone number -> display name (applies wherever we have a name)
+      let senderPhoneUpdated = 0;
+      let senderNameUpdated = 0;
+
+      // A) Rewrite senderPhone from LID digits to real phone digits.
       for (const [lidJid, phoneJid] of lidToPhone.entries()) {
-        const name = phoneToName.get(phoneJid);
-        if (name) lidToName.set(lidJid, name);
+        const lidDigits = lidJid.replace(/@.*$/, "");
+        const phoneDigits = phoneJid.replace(/@.*$/, "");
+        if (lidDigits === phoneDigits) continue;
+        const res = await prisma.message.updateMany({
+          where: { senderPhone: lidDigits },
+          data: { senderPhone: phoneDigits },
+        });
+        senderPhoneUpdated += res.count;
       }
 
-      let senderNameUpdated = 0;
-      let senderPhoneUpdated = 0;
-      for (const [lidJid, displayName] of lidToName.entries()) {
-        const lidDigits = lidJid.replace(/@.*$/, "");
-        const realPhoneJid = lidToPhone.get(lidJid);
-        const realPhoneDigits = realPhoneJid?.replace(/@.*$/, "") ?? null;
-
-        // Update senderName on rows stored with the bare LID as senderPhone.
-        const resName = await prisma.message.updateMany({
-          where: { senderPhone: lidDigits },
+      // B) Set senderName wherever we know it. Also clear senderName when it's
+      // just the LID digits so the UI can show a fallback instead.
+      for (const [phoneJid, displayName] of phoneToName.entries()) {
+        const phoneDigits = phoneJid.replace(/@.*$/, "");
+        const res = await prisma.message.updateMany({
+          where: { senderPhone: phoneDigits },
           data: { senderName: displayName },
         });
-        senderNameUpdated += resName.count;
-
-        // Also replace the LID in senderPhone with the real phone number so
-        // the dashboard shows proper numbers instead of opaque LIDs.
-        if (realPhoneDigits) {
-          const resPhone = await prisma.message.updateMany({
-            where: { senderPhone: lidDigits },
-            data: { senderPhone: realPhoneDigits },
-          });
-          senderPhoneUpdated += resPhone.count;
-        }
+        senderNameUpdated += res.count;
       }
+
+      // Clear senderName when it equals the senderPhone (i.e. it's a bare LID
+      // digit string we never resolved). Leaves it null so the UI can fall back
+      // to showing the phone number nicely.
+      await prisma.$executeRawUnsafe(
+        `UPDATE "Message" SET "senderName" = NULL WHERE "senderName" = "senderPhone"`,
+      );
 
       fastify.log.info(
         { chatNameUpdated, senderNameUpdated, senderPhoneUpdated },
@@ -346,6 +351,88 @@ export const instanceRoutes: FastifyPluginAsync<InstanceRoutesDeps> = async (
         },
         error: lastError,
       };
+    },
+  );
+
+  // Manually set display names for phone numbers. Body is a plain object
+  // where keys are phone numbers (digits only) and values are the display
+  // name to use. The mapping is persisted in the Config table (one row
+  // per phone) so it survives restarts and is applied by future ingests.
+  fastify.post<{ Body: { mapping: Record<string, string> } }>(
+    "/api/instance/name-mapping",
+    async (req, reply) => {
+      try {
+        requireAuth(req);
+      } catch {
+        return reply.code(401).send({ error: "Unauthorized" });
+      }
+
+      const mapping = req.body?.mapping;
+      if (!mapping || typeof mapping !== "object") {
+        return reply.code(400).send({ error: "mapping object required" });
+      }
+
+      let updated = 0;
+      for (const [rawPhone, rawName] of Object.entries(mapping)) {
+        if (!rawPhone || !rawName) continue;
+        const phone = rawPhone.replace(/\D/g, "");
+        const name = String(rawName).trim();
+        if (!phone || !name) continue;
+
+        // Persist in Config so the webhook ingest can reuse it later.
+        await prisma.config.upsert({
+          where: { key: `name:${phone}` },
+          create: { key: `name:${phone}`, value: name },
+          update: { value: name },
+        });
+
+        // Apply to existing rows.
+        const res = await prisma.message.updateMany({
+          where: { senderPhone: phone },
+          data: { senderName: name },
+        });
+        updated += res.count;
+      }
+
+      return { ok: true, updated };
+    },
+  );
+
+  // List senders in a specific group who don't have a resolved name yet.
+  // Useful so the user can see what to map.
+  fastify.get<{ Querystring: { group?: string } }>(
+    "/api/instance/unresolved-senders",
+    async (req, reply) => {
+      try {
+        requireAuth(req);
+      } catch {
+        return reply.code(401).send({ error: "Unauthorized" });
+      }
+
+      const groupFilter = req.query.group ?? config.BE_HOME_LEADS_GROUP_NAME;
+
+      const rows = await prisma.message.groupBy({
+        by: ["senderPhone", "senderName"],
+        where: {
+          isGroup: true,
+          chatName: { contains: groupFilter, mode: "insensitive" },
+        },
+        _count: { id: true },
+      });
+
+      // Only keep rows where the name is missing or equals the phone (unresolved)
+      const unresolved = rows
+        .filter((r) => {
+          const hasName = r.senderName && !/^\d+$/.test(r.senderName);
+          return !hasName;
+        })
+        .sort((a, b) => b._count.id - a._count.id)
+        .map((r) => ({
+          senderPhone: r.senderPhone,
+          messageCount: r._count.id,
+        }));
+
+      return { unresolved };
     },
   );
 

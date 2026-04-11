@@ -34,11 +34,34 @@ export interface IngestResult {
  * command based on the saved message.
  */
 export class MessageIngest {
+  /**
+   * In-memory cache of the user's manual name mapping, keyed by phone digits.
+   * Populated on first use and refreshed via refreshNameCache().
+   */
+  private nameCache = new Map<string, string>();
+  private nameCacheLoaded = false;
+
   constructor(
     private readonly prisma: PrismaClient,
     private readonly selfIdentity: SelfIdentity,
     private readonly logger: Logger,
   ) {}
+
+  async refreshNameCache(): Promise<void> {
+    const rows = await this.prisma.config.findMany({
+      where: { key: { startsWith: "name:" } },
+    });
+    this.nameCache.clear();
+    for (const row of rows) {
+      const phone = row.key.slice("name:".length);
+      this.nameCache.set(phone, row.value);
+    }
+    this.nameCacheLoaded = true;
+  }
+
+  private async ensureNameCache(): Promise<void> {
+    if (!this.nameCacheLoaded) await this.refreshNameCache();
+  }
 
   /**
    * Backfill ingest — takes a raw Evolution record (from /chat/findMessages)
@@ -60,6 +83,8 @@ export class MessageIngest {
       phoneToName: Map<string, string>;
     },
   ): Promise<{ saved: boolean; duplicate: boolean }> {
+    await this.ensureNameCache();
+
     const key = record.key as
       | { id?: string; fromMe?: boolean; remoteJid?: string; participant?: string }
       | undefined;
@@ -89,16 +114,23 @@ export class MessageIngest {
       senderPhone = jidToChatId(resolvedPhoneJid);
 
       // Display name priority:
-      //   1. phoneNumber -> pushName from contacts (real name)
-      //   2. original record.pushName IF it's not just digits (unresolved LID)
-      //   3. null
-      const nameFromContacts = resolver.phoneToName.get(resolvedPhoneJid);
-      if (nameFromContacts) {
-        senderName = nameFromContacts;
-      } else {
-        const recordPushName = record.pushName as string | undefined;
-        if (recordPushName && !/^\d+$/.test(recordPushName)) {
-          senderName = recordPushName;
+      //   1. Manual mapping from Config (what the user set via /api/instance/name-mapping)
+      //   2. phoneNumber -> pushName from contacts (real name)
+      //   3. original record.pushName IF it's not just digits (unresolved LID)
+      //   4. null
+      if (senderPhone) {
+        const manualName = this.nameCache.get(senderPhone);
+        if (manualName) senderName = manualName;
+      }
+      if (!senderName) {
+        const nameFromContacts = resolver.phoneToName.get(resolvedPhoneJid);
+        if (nameFromContacts) {
+          senderName = nameFromContacts;
+        } else {
+          const recordPushName = record.pushName as string | undefined;
+          if (recordPushName && !/^\d+$/.test(recordPushName)) {
+            senderName = recordPushName;
+          }
         }
       }
     }
@@ -144,6 +176,8 @@ export class MessageIngest {
   }
 
   async ingest(data: EvolutionMessagesUpsertData): Promise<IngestResult> {
+    await this.ensureNameCache();
+
     const key = data.key;
     if (!key?.id) {
       this.logger.debug("Webhook message missing key.id — skipping");
@@ -168,6 +202,19 @@ export class MessageIngest {
     const selfJid = this.selfIdentity.getJid();
     const isSelfChat = fromMe && selfJid !== null && remoteJid === selfJid;
 
+    // Resolve senderName: prefer manual mapping, then pushName if it's a real
+    // name (not just digits = unresolved LID).
+    let resolvedSenderName: string | null = null;
+    if (senderPhone) {
+      const manualName = this.nameCache.get(senderPhone);
+      if (manualName) {
+        resolvedSenderName = manualName;
+      }
+    }
+    if (!resolvedSenderName && data.pushName && !/^\d+$/.test(data.pushName)) {
+      resolvedSenderName = data.pushName;
+    }
+
     try {
       const saved = await this.prisma.message.create({
         data: {
@@ -175,7 +222,7 @@ export class MessageIngest {
           chatId,
           chatName,
           senderPhone,
-          senderName: data.pushName ?? null,
+          senderName: resolvedSenderName,
           content,
           rawMessage: data as unknown as Prisma.InputJsonValue,
           messageType,
