@@ -50,21 +50,7 @@ export function formatStatusReply(group: LeadGroup, shortDate: string): string {
 
   if (group.skipped > 0) {
     lines.push("");
-    const breakdown = group.skippedByReason ?? {};
-    const tooShort = breakdown.too_short ?? 0;
-    const noSignal = breakdown.no_signal ?? 0;
-    const empty = breakdown.empty ?? 0;
-    // Single summary line, ignored messages broken down by reason.
-    const parts: string[] = [];
-    if (tooShort > 0) parts.push(`${tooShort} short (chat/coordination)`);
-    if (noSignal > 0) parts.push(`${noSignal} no-signal (discussion)`);
-    if (empty > 0) parts.push(`${empty} empty/media`);
-    if (parts.length > 0) {
-      lines.push(`_⏭️  Ignored ${group.skipped} non-lead msg(s): ${parts.join(", ")}_`);
-    } else {
-      lines.push(`_⏭️  Ignored ${group.skipped} non-lead message(s)._`);
-    }
-    lines.push(`_Use \`/audit\` to review ignored messages._`);
+    lines.push(`_${group.skipped} non-lead message(s) excluded._`);
   }
 
   return lines.join("\n");
