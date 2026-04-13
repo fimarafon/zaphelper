@@ -116,6 +116,18 @@ export const webhookRoutes: FastifyPluginAsync<WebhookDeps> = async (fastify, de
         });
       });
     }
+
+    // Delegate command: someone authorized sent a / command as a DM to the owner.
+    // Reply goes to THEM, not to self-chat.
+    if (result.isDelegateCommand && result.delegatePhone) {
+      setImmediate(() => {
+        dispatcher
+          .dispatchAsDelegate(result.saved!, result.delegatePhone!)
+          .catch((err) => {
+            fastify.log.error({ err, delegate: result.delegatePhone }, "Delegate dispatch failed");
+          });
+      });
+    }
   }
 
   async function handleMessagesUpdate(

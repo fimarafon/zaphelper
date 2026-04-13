@@ -10,12 +10,14 @@ import { registerAuthHook } from "./middleware/auth.js";
 import { prisma } from "./prisma.js";
 import { authRoutes } from "./routes/auth.js";
 import { commandRoutes } from "./routes/commands.js";
+import { delegatesRoutes } from "./routes/delegates.js";
 import { instanceRoutes } from "./routes/instance.js";
 import { messagesRoutes } from "./routes/messages.js";
 import { remindersRoutes } from "./routes/reminders.js";
 import { schedulesRoutes } from "./routes/schedules.js";
 import { webhookRoutes } from "./routes/webhook.js";
 import { CommandDispatcher } from "./services/command-dispatcher.js";
+import { DelegateService } from "./services/delegate-service.js";
 import { IncrementalSync } from "./services/incremental-sync.js";
 import { MessageIngest } from "./services/message-ingest.js";
 import { Scheduler } from "./services/scheduler.js";
@@ -59,11 +61,14 @@ async function bootstrap() {
   );
   const taskService = new ScheduledTaskService(prisma, taskRunner, actionRegistry);
 
+  // Delegate service — manages who can run commands by messaging the owner.
+  const delegateService = new DelegateService(prisma);
+
   // Command registry with both static and dynamic commands.
-  const commandList = buildCommandList({ taskService });
+  const commandList = buildCommandList({ taskService, delegateService });
   const registry = new CommandRegistry(commandList);
 
-  const ingest = new MessageIngest(prisma, selfIdentity, logger);
+  const ingest = new MessageIngest(prisma, selfIdentity, logger, delegateService);
 
   // Incremental sync — safety net for the webhook. Pulls anything Evolution
   // received but didn't deliver (e.g. during restarts / brief crashes). Also
@@ -85,6 +90,7 @@ async function bootstrap() {
     selfIdentity,
     config,
     incrementalSync,
+    delegateService,
     logger,
   );
 
@@ -210,6 +216,7 @@ async function bootstrap() {
   await app.register(commandRoutes, { prisma, registry, dispatcher });
   await app.register(remindersRoutes, { prisma, scheduler });
   await app.register(schedulesRoutes, { taskService, actionRegistry });
+  await app.register(delegatesRoutes, { delegateService });
 
   app.setErrorHandler((err, _req, reply) => {
     const statusCode = (err as Error & { statusCode?: number }).statusCode ?? 500;

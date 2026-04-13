@@ -5,6 +5,7 @@ import type {
   EvolutionMessagesUpsertData,
 } from "../evolution/webhook-types.js";
 import { isGroupJid, jidToChatId } from "../utils/phone.js";
+import type { DelegateService } from "./delegate-service.js";
 import type { SelfIdentity } from "./self-identity.js";
 
 export interface IngestedMessage {
@@ -25,7 +26,9 @@ export interface IngestedMessage {
 export interface IngestResult {
   saved: IngestedMessage | null;
   duplicate: boolean;
-  isSelfCommand: boolean; // fromMe + selfChat + starts with "/"
+  isSelfCommand: boolean;      // fromMe + selfChat + starts with "/"
+  isDelegateCommand: boolean;  // !fromMe + DM to me + starts with "/" + sender is active delegate
+  delegatePhone: string | null; // phone of the delegate who sent the command (reply target)
 }
 
 /**
@@ -45,6 +48,7 @@ export class MessageIngest {
     private readonly prisma: PrismaClient,
     private readonly selfIdentity: SelfIdentity,
     private readonly logger: Logger,
+    private readonly delegateService?: DelegateService,
   ) {}
 
   async refreshNameCache(): Promise<void> {
@@ -314,7 +318,7 @@ export class MessageIngest {
     const key = data.key;
     if (!key?.id) {
       this.logger.debug("Webhook message missing key.id — skipping");
-      return { saved: null, duplicate: false, isSelfCommand: false };
+      return { saved: null, duplicate: false, isSelfCommand: false, isDelegateCommand: false, delegatePhone: null };
     }
 
     const remoteJid = key.remoteJid;
@@ -368,6 +372,31 @@ export class MessageIngest {
 
       const isSelfCommand = isSelfChat && content.trim().startsWith("/");
 
+      // Delegate command detection:
+      // - NOT from me (someone else sent it)
+      // - NOT a group message (DM directly to my number)
+      // - Content starts with "/"
+      // - Sender's phone is an active delegate
+      let isDelegateCommand = false;
+      let delegatePhone: string | null = null;
+      if (
+        !fromMe &&
+        !isGroup &&
+        content.trim().startsWith("/") &&
+        senderPhone &&
+        this.delegateService
+      ) {
+        await this.delegateService.ensureLoaded();
+        if (this.delegateService.isActiveDelegate(senderPhone)) {
+          isDelegateCommand = true;
+          delegatePhone = senderPhone;
+          this.logger.info(
+            { senderPhone, command: content.trim().split(/\s+/)[0] },
+            "Delegate command detected",
+          );
+        }
+      }
+
       return {
         saved: {
           id: saved.id,
@@ -385,6 +414,8 @@ export class MessageIngest {
         },
         duplicate: false,
         isSelfCommand,
+        isDelegateCommand,
+        delegatePhone,
       };
     } catch (err) {
       if (
@@ -400,7 +431,7 @@ export class MessageIngest {
           { waMessageId: key.id, chatId },
           "Dedupe: message already ingested (idempotent no-op)",
         );
-        return { saved: null, duplicate: true, isSelfCommand: false };
+        return { saved: null, duplicate: true, isSelfCommand: false, isDelegateCommand: false, delegatePhone: null };
       }
       throw err;
     }

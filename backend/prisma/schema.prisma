@@ -117,6 +117,23 @@ enum InstanceStatus {
   ERROR
 }
 
+// A person authorized to trigger commands by messaging the owner.
+// When enabled, messages from this phone starting with "/" are processed
+// as if the owner typed them — but the reply goes to the DELEGATE, not
+// to self-chat.
+model Delegate {
+  id        String   @id @default(cuid())
+  phone     String   @unique           // digits only, e.g. "14255245126"
+  name      String                     // display name, e.g. "Jack Be Home Remodeling"
+  enabled   Boolean  @default(true)    // owner can toggle on/off
+  // Permissions: which command prefixes this delegate can use.
+  // Empty array = read-only defaults (status*, audit, help, schedules, reminders).
+  // ["*"] = all commands (same as owner). Use with caution.
+  allowedCommands String[] @default([])
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
 // Generic scheduled task — runs an Action on a cron schedule or one-shot.
 // Designed to be extensible: actionType is a plain string keyed into the
 // ActionRegistry at runtime, and actionPayload is free-form JSON.

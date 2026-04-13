@@ -4,6 +4,7 @@ import type { AppConfig } from "../config.js";
 import type { CommandRegistry } from "../commands/registry.js";
 import type { CommandContext } from "../commands/types.js";
 import type { EvolutionClient } from "../evolution/client.js";
+import type { DelegateService } from "./delegate-service.js";
 import type { IncrementalSync } from "./incremental-sync.js";
 import type { Scheduler } from "./scheduler.js";
 import type { SelfIdentity } from "./self-identity.js";
@@ -26,6 +27,7 @@ export class CommandDispatcher {
     private readonly selfIdentity: SelfIdentity,
     private readonly config: AppConfig,
     private readonly incrementalSync: IncrementalSync,
+    private readonly delegateService: DelegateService,
     logger: Logger,
   ) {
     this.logger = logger.child({ component: "dispatcher" });
@@ -120,6 +122,98 @@ export class CommandDispatcher {
           error: msg,
           durationMs: Date.now() - start,
         },
+      });
+    }
+  }
+
+  /**
+   * Dispatch a command triggered by a DELEGATE — someone authorized to run
+   * commands by messaging the owner directly (DM, not group, not self-chat).
+   *
+   * Key differences from dispatch():
+   *   - Reply goes to the DELEGATE's phone, not the owner's self-chat
+   *   - Permission check: delegate can only run whitelisted commands
+   *   - CommandLog records the delegate phone for audit
+   */
+  async dispatchAsDelegate(
+    message: IngestedMessage,
+    delegatePhone: string,
+  ): Promise<void> {
+    const start = Date.now();
+    const content = message.content.trim();
+    if (!content.startsWith("/")) return;
+
+    const withoutSlash = content.slice(1).trim();
+    const parsed = this.registry.parseCommandLine(withoutSlash);
+
+    if (!parsed) {
+      const firstToken = withoutSlash.split(/\s+/)[0] ?? "";
+      await this.safeSend(delegatePhone, `❓ Unknown command: /${firstToken}`);
+      return;
+    }
+
+    const { command: cmd, rawInput, args } = parsed;
+
+    // Permission check
+    if (!this.delegateService.canRunCommand(delegatePhone, cmd.name)) {
+      await this.safeSend(
+        delegatePhone,
+        `🔒 You don't have permission to run /${cmd.name}.\nAllowed: status commands, audit, help.`,
+      );
+      return;
+    }
+
+    const logRow = await this.prisma.commandLog.create({
+      data: {
+        command: cmd.name,
+        args: rawInput || null,
+        rawInput: content,
+        messageId: message.id,
+        status: "SUCCESS",
+      },
+    });
+
+    // Use the owner's identity (selfJid/selfPhone) for the ctx so status
+    // queries etc. work exactly the same. Only the REPLY target changes.
+    const selfJid = this.selfIdentity.getJid() ?? "";
+    const selfPhone = this.selfIdentity.getPhone() ?? "";
+
+    const ctx: CommandContext = {
+      args,
+      rawInput,
+      command: cmd.name,
+      prisma: this.prisma,
+      evolution: this.evolution,
+      scheduler: this.scheduler,
+      incrementalSync: this.incrementalSync,
+      selfJid,
+      selfPhone,
+      config: this.config,
+      logger: this.logger.child({ command: cmd.name, delegate: delegatePhone }),
+      now: new Date(),
+      getCommands: () => this.registry.all(),
+    };
+
+    try {
+      const result = await cmd.execute(ctx);
+      // Reply goes to the DELEGATE, not self-chat
+      await this.safeSend(delegatePhone, result.reply);
+      await this.prisma.commandLog.update({
+        where: { id: logRow.id },
+        data: {
+          status: result.success ? "SUCCESS" : "FAILURE",
+          output: result.reply,
+          error: result.error ?? null,
+          durationMs: Date.now() - start,
+        },
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.logger.error({ err, cmd: cmd.name, delegate: delegatePhone }, "Delegate command failed");
+      await this.safeSend(delegatePhone, `💥 Error: ${msg}`);
+      await this.prisma.commandLog.update({
+        where: { id: logRow.id },
+        data: { status: "FAILURE", error: msg, durationMs: Date.now() - start },
       });
     }
   }

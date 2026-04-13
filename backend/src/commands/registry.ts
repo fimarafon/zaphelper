@@ -1,6 +1,8 @@
 import type { Command } from "./types.js";
+import type { DelegateService } from "../services/delegate-service.js";
 import type { ScheduledTaskService } from "../services/scheduled-task-service.js";
 import { auditCommand } from "./audit.command.js";
+import { createDelegateCommand } from "./delegate.command.js";
 import { helpCommand } from "./help.command.js";
 import { reminderCommand } from "./reminder.command.js";
 import { remindersCommand } from "./reminders.command.js";
@@ -57,6 +59,7 @@ export const allCommands: Command[] = staticCommands;
  */
 export function buildCommandList(deps: {
   taskService?: ScheduledTaskService;
+  delegateService?: DelegateService;
 }): Command[] {
   const list: Command[] = [...staticCommands];
   if (deps.taskService) {
@@ -65,6 +68,9 @@ export function buildCommandList(deps: {
       createSchedulesCommand(deps.taskService),
       createUnscheduleCommand(deps.taskService),
     );
+  }
+  if (deps.delegateService) {
+    list.push(createDelegateCommand(deps.delegateService));
   }
   return list;
 }
