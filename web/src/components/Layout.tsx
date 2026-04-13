@@ -4,10 +4,11 @@ import { useLogout, useMe } from "../api/hooks";
 
 const NAV = [
   { to: "/", label: "Dashboard", end: true },
-  { to: "/messages", label: "Mensagens" },
-  { to: "/commands", label: "Comandos" },
-  { to: "/reminders", label: "Lembretes" },
+  { to: "/messages", label: "Messages" },
+  { to: "/commands", label: "Commands" },
+  { to: "/reminders", label: "Reminders" },
   { to: "/schedules", label: "Schedules" },
+  { to: "/delegates", label: "Delegates" },
 ];
 
 export function Layout() {

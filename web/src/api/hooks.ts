@@ -310,3 +310,57 @@ export function useDeleteSchedule() {
     },
   });
 }
+
+// ---- Delegates ----
+
+export interface Delegate {
+  id: string;
+  phone: string;
+  name: string;
+  enabled: boolean;
+  allowedCommands: string[];
+  createdAt: string;
+}
+
+export function useDelegates() {
+  return useQuery({
+    queryKey: ["delegates"],
+    queryFn: () => api.get<{ items: Delegate[] }>("/api/delegates"),
+  });
+}
+
+export function useAddDelegate() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: { phone: string; name: string }) =>
+      api.post<{ ok: true; delegate: Delegate }>("/api/delegates", body),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["delegates"] });
+    },
+  });
+}
+
+export function useToggleDelegate() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ phone, enabled }: { phone: string; enabled: boolean }) =>
+      api.post<{ ok: true; delegate: Delegate }>(
+        `/api/delegates/${phone}/toggle`,
+        { enabled },
+      ),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["delegates"] });
+    },
+  });
+}
+
+export function useDeleteDelegate() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (phone: string) =>
+      api.del<{ ok: true }>(`/api/delegates/${phone}`),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["delegates"] });
+    },
+  });
+}
