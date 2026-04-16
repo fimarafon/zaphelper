@@ -514,6 +514,11 @@ export const instanceRoutes: FastifyPluginAsync<InstanceRoutesDeps> = async (
         updated += res.count;
       }
 
+      // CRITICAL: refresh the in-memory name cache so future webhook ingests
+      // pick up the new mappings immediately (otherwise new messages keep
+      // using the stale pushName from Baileys until the next restart).
+      await ingest.refreshNameCache();
+
       return { ok: true, updated };
     },
   );
