@@ -8,6 +8,22 @@ import { isGroupJid, jidToChatId } from "../utils/phone.js";
 import type { DelegateService } from "./delegate-service.js";
 import type { SelfIdentity } from "./self-identity.js";
 
+/**
+ * Sentinel content values that indicate the message was intentionally
+ * suppressed — either by a "delete for everyone" on WhatsApp (webhook-driven)
+ * or by a manual exclusion from the dashboard (DELETE /api/messages/:id).
+ *
+ * Every path that might overwrite message.content (applyUpdate, ingestRaw
+ * edit-detection, fastChatSync) MUST check this before writing. Otherwise
+ * the next sync pull from Evolution will resurrect the original content
+ * (because Evolution still has the pre-delete payload on its end).
+ */
+export const EXCLUDED_SENTINELS = new Set(["[excluded]", "[deleted]"]);
+
+export function isExcludedContent(content: string | null | undefined): boolean {
+  return content != null && EXCLUDED_SENTINELS.has(content);
+}
+
 export interface IngestedMessage {
   id: string;
   waMessageId: string;
@@ -187,7 +203,8 @@ export class MessageIngest {
             existing &&
             content &&
             content !== "[Unsupported message]" &&
-            existing.content !== content
+            existing.content !== content &&
+            !isExcludedContent(existing.content)
           ) {
             await this.prisma.message.update({
               where: { waMessageId: key.id },
@@ -247,6 +264,17 @@ export class MessageIngest {
       });
 
       if (existing) {
+        // If the message was manually excluded (via dashboard) or marked as
+        // deleted (via WhatsApp "delete for everyone"), do not let an edit
+        // event resurrect the content. The user already decided they want
+        // this message out of lead counts — an edit is irrelevant.
+        if (isExcludedContent(existing.content)) {
+          this.logger.info(
+            { waMessageId: key.id, existingContent: existing.content },
+            "Ignoring applyUpdate on excluded/deleted message",
+          );
+          return { updated: false, inserted: false, notFound: false };
+        }
         await this.prisma.message.update({
           where: { waMessageId: key.id },
           data: {

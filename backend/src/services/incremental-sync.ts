@@ -3,7 +3,11 @@ import cron, { type ScheduledTask } from "node-cron";
 import type { Logger } from "pino";
 import type { AppConfig } from "../config.js";
 import type { EvolutionClient } from "../evolution/client.js";
-import { extractContent, type MessageIngest } from "./message-ingest.js";
+import {
+  extractContent,
+  isExcludedContent,
+  type MessageIngest,
+} from "./message-ingest.js";
 
 interface ResolverCache {
   chatNameMap: Map<string, string>;
@@ -278,7 +282,14 @@ export class IncrementalSync {
 
       const existingContent = existingMap.get(key.id);
       if (existingContent !== undefined) {
-        // Already have it — check for edits.
+        // Already have it — check for edits. BUT: if the existing content is
+        // a manual exclusion sentinel ("[excluded]" / "[deleted]"), do NOT
+        // overwrite it. Evolution still holds the pre-exclusion payload, so
+        // without this guard every sync tick would resurrect the content.
+        if (isExcludedContent(existingContent)) {
+          duplicate += 1;
+          continue;
+        }
         const { content, messageType } = extractContent(
           (record.message ?? {}) as Parameters<typeof extractContent>[0],
         );
