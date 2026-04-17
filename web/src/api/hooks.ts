@@ -157,6 +157,16 @@ export function useMessages(params: MessagesQuery = {}) {
   });
 }
 
+export function useExcludeMessage() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => api.del<{ ok: true }>(`/api/messages/${id}`),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["messages"] });
+    },
+  });
+}
+
 export function useChatList() {
   return useQuery({
     queryKey: ["messages", "chats"],

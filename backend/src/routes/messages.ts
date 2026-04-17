@@ -1,4 +1,4 @@
-import type { PrismaClient } from "@prisma/client";
+import type { Prisma, PrismaClient } from "@prisma/client";
 import type { FastifyPluginAsync } from "fastify";
 import { requireAuth } from "../middleware/auth.js";
 
@@ -85,6 +85,58 @@ export const messagesRoutes: FastifyPluginAsync<MessagesRoutesDeps> = async (
           timestamp: m.timestamp,
         })),
         nextCursor,
+      };
+    },
+  );
+
+  // Manually exclude a message from lead counts (and all queries that filter
+  // `messageType: "TEXT"`). This is the same mechanism `applyDelete` uses when
+  // a WhatsApp "delete for everyone" webhook fires — but it's triggered by a
+  // human via the dashboard, which is needed when the user deletes only for
+  // themselves (no webhook fires) or when a lead was recorded but later
+  // cancelled / converted / mis-parsed.
+  //
+  // We keep the row (so audit/history works) but:
+  //   - content → "[excluded]"
+  //   - messageType → "OTHER" (so /statustoday etc skip it)
+  //   - rawMessage._excludedAt → timestamp
+  //   - rawMessage._originalContent → preserve the old content for forensics
+  fastify.delete<{ Params: { id: string } }>(
+    "/api/messages/:id",
+    async (req, reply) => {
+      try {
+        requireAuth(req);
+      } catch {
+        return reply.code(401).send({ error: "Unauthorized" });
+      }
+
+      const { id } = req.params;
+      const existing = await prisma.message.findUnique({ where: { id } });
+      if (!existing) {
+        return reply.code(404).send({ error: "Message not found" });
+      }
+
+      const updated = await prisma.message.update({
+        where: { id },
+        data: {
+          content: "[excluded]",
+          messageType: "OTHER",
+          rawMessage: {
+            ...((existing.rawMessage ?? {}) as Record<string, unknown>),
+            _excludedAt: new Date().toISOString(),
+            _originalContent: existing.content,
+            _originalMessageType: existing.messageType,
+          } as unknown as Prisma.InputJsonValue,
+        },
+      });
+
+      return {
+        ok: true,
+        message: {
+          id: updated.id,
+          content: updated.content,
+          messageType: updated.messageType,
+        },
       };
     },
   );
