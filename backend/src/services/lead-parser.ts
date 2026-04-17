@@ -358,9 +358,14 @@ export function parseLeadWithReason(content: string): LeadParseResult {
     }
   }
 
-  // Require at least one of: name, phone, scheduledAt. Otherwise it's probably noise.
-  const hasSignal = Boolean(lead.name || lead.phone || lead.scheduledAt);
-  if (!hasSignal) {
+  // A real lead has EITHER a recognized source (Thumbtack/Angi/etc — strong
+  // signal that someone explicitly tagged the message as a lead) OR at least
+  // 2 of { name, phone, scheduledAt }. A lone phone number ("Someone called
+  // (619) 922-2190") or a lone name is almost always chatter, not a lead.
+  const signalCount =
+    (lead.name ? 1 : 0) + (lead.phone ? 1 : 0) + (lead.scheduledAt ? 1 : 0);
+  const isLead = Boolean(lead.source) || signalCount >= 2;
+  if (!isLead) {
     return { lead: null, skipReason: "no_signal" };
   }
 
