@@ -267,6 +267,26 @@ export class MessageIngest {
     const key = data.key;
     if (!key?.id) return { updated: false, inserted: false, notFound: true };
 
+    // Some Evolution builds deliver "delete for everyone" as messages.update
+    // rather than messages.upsert or messages.delete. Catch that case here:
+    // if the update payload is a protocolMessage REVOKE, route to applyDelete
+    // on the referenced original id instead of trying to apply an edit.
+    const revokeAsUpdate = detectRevoke(data.message);
+    if (revokeAsUpdate) {
+      await this.applyDelete({
+        key: {
+          id: revokeAsUpdate.revokedMessageId,
+          remoteJid: revokeAsUpdate.revokedRemoteJid ?? key.remoteJid ?? "",
+          fromMe: revokeAsUpdate.revokedFromMe ?? key.fromMe ?? false,
+        },
+      } as EvolutionMessagesUpsertData);
+      this.logger.info(
+        { revokedId: revokeAsUpdate.revokedMessageId, updateEventId: key.id },
+        "Handled protocolMessage REVOKE arriving via messages.update",
+      );
+      return { updated: true, inserted: false, notFound: false };
+    }
+
     const { content, messageType } = extractContent(data.message ?? {});
 
     // Some Evolution builds send updates with an empty message payload
