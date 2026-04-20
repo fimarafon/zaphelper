@@ -142,8 +142,8 @@ export const messagesRoutes: FastifyPluginAsync<MessagesRoutesDeps> = async (
     },
   );
 
-  // DEBUG: inspect the raw payload shape of a few "[Unsupported message]" rows
-  // so we can figure out the exact protocolMessage structure Evolution sends.
+  // DEBUG: histogram of "[Unsupported message]" rows by top-level message key.
+  // Tells us what kinds of body shapes are hiding in the stray OTHER pool.
   fastify.get("/api/admin/peek-unsupported", async (req, reply) => {
     try {
       requireAuth(req);
@@ -155,8 +155,6 @@ export const messagesRoutes: FastifyPluginAsync<MessagesRoutesDeps> = async (
         content: "[Unsupported message]",
         messageType: "OTHER",
       },
-      orderBy: { timestamp: "desc" },
-      take: 5,
       select: {
         id: true,
         waMessageId: true,
@@ -164,7 +162,24 @@ export const messagesRoutes: FastifyPluginAsync<MessagesRoutesDeps> = async (
         rawMessage: true,
       },
     });
-    return { rows };
+    const histogram: Record<string, number> = {};
+    const samples: Record<string, { id: string; waMessageId: string; ts: string; snippet: string }> = {};
+    for (const r of rows) {
+      const raw = r.rawMessage as Record<string, unknown> | null;
+      const msg = (raw?.message ?? {}) as Record<string, unknown>;
+      const keys = Object.keys(msg).filter((k) => k !== "messageContextInfo");
+      const sig = keys.sort().join("+") || "(empty)";
+      histogram[sig] = (histogram[sig] ?? 0) + 1;
+      if (!samples[sig]) {
+        samples[sig] = {
+          id: r.id,
+          waMessageId: r.waMessageId,
+          ts: r.timestamp.toISOString(),
+          snippet: JSON.stringify(msg).slice(0, 400),
+        };
+      }
+    }
+    return { total: rows.length, histogram, samples };
   });
 
   // Retroactively process WhatsApp "delete for everyone" events that were
