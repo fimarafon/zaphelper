@@ -112,6 +112,24 @@ export class MessageIngest {
       return { saved: false, duplicate: false };
     }
 
+    // Same revoke interception as ingest() — during backfill / incremental
+    // sync we might pull historical revoke events that our webhook missed.
+    const revokeInSync = detectRevoke(record.message);
+    if (revokeInSync) {
+      await this.applyDelete({
+        key: {
+          id: revokeInSync.revokedMessageId,
+          remoteJid: revokeInSync.revokedRemoteJid ?? key.remoteJid,
+          fromMe: revokeInSync.revokedFromMe ?? key.fromMe ?? false,
+        },
+      } as EvolutionMessagesUpsertData);
+      this.logger.info(
+        { revokedId: revokeInSync.revokedMessageId, revokeEventId: key.id },
+        "Handled protocolMessage REVOKE during backfill",
+      );
+      return { saved: false, duplicate: true };
+    }
+
     // Normalize the message body: Evolution's record.message is the raw Baileys
     // body, which matches what the webhook handler already knows how to parse.
     const messageBody = (record.message ?? {}) as EvolutionMessageBody;
@@ -349,6 +367,28 @@ export class MessageIngest {
       return { saved: null, duplicate: false, isSelfCommand: false, isDelegateCommand: false, delegatePhone: null };
     }
 
+    // Intercept "delete for everyone" — Baileys delivers this as a
+    // messages.upsert event carrying a protocolMessage with type REVOKE.
+    // The revoke has its own key.id; the id of the message being revoked
+    // lives in message.protocolMessage.key.id. We translate this into an
+    // applyDelete() call on the original and swallow the revoke event
+    // itself (no row for the tombstone).
+    const revoke = detectRevoke(data.message);
+    if (revoke) {
+      await this.applyDelete({
+        key: {
+          id: revoke.revokedMessageId,
+          remoteJid: revoke.revokedRemoteJid ?? key.remoteJid ?? "",
+          fromMe: revoke.revokedFromMe ?? key.fromMe ?? false,
+        },
+      } as EvolutionMessagesUpsertData);
+      this.logger.info(
+        { revokedId: revoke.revokedMessageId, revokeEventId: key.id },
+        "Handled protocolMessage REVOKE (delete for everyone)",
+      );
+      return { saved: null, duplicate: false, isSelfCommand: false, isDelegateCommand: false, delegatePhone: null };
+    }
+
     const remoteJid = key.remoteJid;
     const isGroup = isGroupJid(remoteJid);
     const fromMe = Boolean(key.fromMe);
@@ -509,6 +549,55 @@ export function extractContent(body: EvolutionMessageBody): {
     return { content: "[Location]", messageType: "LOCATION" };
   }
   return { content: "[Unsupported message]", messageType: "OTHER" };
+}
+
+/**
+ * WhatsApp "delete for everyone" (revoke) detection.
+ *
+ * When a sender clicks "Delete for everyone" in WhatsApp, Baileys (and
+ * therefore Evolution) delivers this as a `messages.upsert` event — NOT
+ * a `messages.delete` — containing a `protocolMessage` of type REVOKE.
+ * The revoke event has its own NEW key.id (the id of the revoke message
+ * itself), and inside `message.protocolMessage.key.id` is the id of the
+ * original message being revoked.
+ *
+ * Without handling this, our ingest creates a stray "[Unsupported message]"
+ * row for the revoke and never marks the original message as deleted — so
+ * the original stays in /statustoday forever.
+ *
+ * protocolMessage types (from waproto.Message.ProtocolMessage.Type):
+ *   0 = REVOKE                    <- "delete for everyone"
+ *   8 = MESSAGE_EDIT              <- "edit message"
+ *   14 = REVOKE (alternate code used in newer Baileys)
+ * We accept the string "REVOKE" or numeric 0/14.
+ */
+export interface RevokeDetection {
+  revokedMessageId: string;
+  revokedFromMe: boolean | undefined;
+  revokedRemoteJid: string | undefined;
+}
+
+export function detectRevoke(
+  body: unknown,
+): RevokeDetection | null {
+  if (!body || typeof body !== "object") return null;
+  const proto = (body as { protocolMessage?: unknown }).protocolMessage;
+  if (!proto || typeof proto !== "object") return null;
+  const type = (proto as { type?: unknown }).type;
+  // Baileys sends numeric enum; Evolution sometimes stringifies it.
+  const isRevoke =
+    type === 0 ||
+    type === 14 ||
+    (typeof type === "string" && type.toUpperCase().includes("REVOKE"));
+  if (!isRevoke) return null;
+  const revokedKey = (proto as { key?: Record<string, unknown> }).key;
+  if (!revokedKey || typeof revokedKey.id !== "string") return null;
+  return {
+    revokedMessageId: revokedKey.id,
+    revokedFromMe: typeof revokedKey.fromMe === "boolean" ? revokedKey.fromMe : undefined,
+    revokedRemoteJid:
+      typeof revokedKey.remoteJid === "string" ? revokedKey.remoteJid : undefined,
+  };
 }
 
 function resolveChatName(

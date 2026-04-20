@@ -1,6 +1,7 @@
 import type { Prisma, PrismaClient } from "@prisma/client";
 import type { FastifyPluginAsync } from "fastify";
 import { requireAuth } from "../middleware/auth.js";
+import { detectRevoke } from "../services/message-ingest.js";
 
 export interface MessagesRoutesDeps {
   prisma: PrismaClient;
@@ -140,6 +141,107 @@ export const messagesRoutes: FastifyPluginAsync<MessagesRoutesDeps> = async (
       };
     },
   );
+
+  // Retroactively process WhatsApp "delete for everyone" events that were
+  // received before the backend knew how to handle protocolMessage REVOKE.
+  //
+  // Before the fix: revokes arrived as messages.upsert with a protocolMessage
+  // body, got decoded as "[Unsupported message]" and saved as stray rows.
+  // The original lead row was never marked deleted, so /statustoday kept
+  // showing cancelled leads.
+  //
+  // After the fix: new revokes are intercepted at ingest time. But old
+  // stray rows need a sweep. This endpoint:
+  //   1. Finds every "[Unsupported message]" row.
+  //   2. Parses its rawMessage.message.protocolMessage.
+  //   3. If REVOKE, marks the referenced original as "[deleted]".
+  //   4. Deletes the stray revoke row itself.
+  //
+  // Safe to run multiple times: rows already processed won't match the
+  // [Unsupported message] filter anymore.
+  fastify.post("/api/admin/reprocess-revokes", async (req, reply) => {
+    try {
+      requireAuth(req);
+    } catch {
+      return reply.code(401).send({ error: "Unauthorized" });
+    }
+
+    const straysToScan = await prisma.message.findMany({
+      where: {
+        content: "[Unsupported message]",
+        messageType: "OTHER",
+      },
+      select: {
+        id: true,
+        waMessageId: true,
+        chatId: true,
+        rawMessage: true,
+        timestamp: true,
+      },
+    });
+
+    let revokesApplied = 0;
+    let straysRemoved = 0;
+    let nonRevokeSkipped = 0;
+    const details: Array<{
+      strayId: string;
+      targetWaId: string | null;
+      targetUpdated: boolean;
+    }> = [];
+
+    for (const stray of straysToScan) {
+      const raw = stray.rawMessage as Record<string, unknown> | null;
+      const revoke = detectRevoke(raw?.message);
+      if (!revoke) {
+        nonRevokeSkipped += 1;
+        continue;
+      }
+
+      // Mark the original (referenced) message as [deleted] if it exists
+      // and isn't already a sentinel. Guard against overwriting [excluded].
+      const target = await prisma.message.findUnique({
+        where: { waMessageId: revoke.revokedMessageId },
+      });
+
+      let targetUpdated = false;
+      if (target && target.content !== "[deleted]" && target.content !== "[excluded]") {
+        await prisma.message.update({
+          where: { waMessageId: revoke.revokedMessageId },
+          data: {
+            content: "[deleted]",
+            messageType: "OTHER",
+            rawMessage: {
+              ...((target.rawMessage ?? {}) as Record<string, unknown>),
+              _deletedAt: stray.timestamp.toISOString(),
+              _deletedRetro: true,
+              _originalContent: target.content,
+            } as unknown as Prisma.InputJsonValue,
+          },
+        });
+        targetUpdated = true;
+        revokesApplied += 1;
+      }
+
+      // Remove the stray revoke row either way — it's noise in the DB.
+      await prisma.message.delete({ where: { id: stray.id } });
+      straysRemoved += 1;
+
+      details.push({
+        strayId: stray.id,
+        targetWaId: revoke.revokedMessageId,
+        targetUpdated,
+      });
+    }
+
+    return {
+      ok: true,
+      scanned: straysToScan.length,
+      revokesApplied,
+      straysRemoved,
+      nonRevokeSkipped,
+      details: details.slice(0, 50), // cap payload size
+    };
+  });
 
   // Distinct chat names — lets the UI build a filter dropdown without loading everything.
   fastify.get("/api/messages/chats", async (req, reply) => {
