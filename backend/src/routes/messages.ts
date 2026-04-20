@@ -142,6 +142,31 @@ export const messagesRoutes: FastifyPluginAsync<MessagesRoutesDeps> = async (
     },
   );
 
+  // DEBUG: inspect the raw payload shape of a few "[Unsupported message]" rows
+  // so we can figure out the exact protocolMessage structure Evolution sends.
+  fastify.get("/api/admin/peek-unsupported", async (req, reply) => {
+    try {
+      requireAuth(req);
+    } catch {
+      return reply.code(401).send({ error: "Unauthorized" });
+    }
+    const rows = await prisma.message.findMany({
+      where: {
+        content: "[Unsupported message]",
+        messageType: "OTHER",
+      },
+      orderBy: { timestamp: "desc" },
+      take: 5,
+      select: {
+        id: true,
+        waMessageId: true,
+        timestamp: true,
+        rawMessage: true,
+      },
+    });
+    return { rows };
+  });
+
   // Retroactively process WhatsApp "delete for everyone" events that were
   // received before the backend knew how to handle protocolMessage REVOKE.
   //
