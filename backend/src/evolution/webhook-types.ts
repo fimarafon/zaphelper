@@ -117,17 +117,83 @@ export function isMessagesUpdate(
 }
 
 /**
- * A message deletion event. We mark the message as deleted (but don't
- * physically remove it — keeping history is more useful than strict DSR).
+ * A message deletion event. Baileys / Evolution can deliver this in THREE
+ * shapes depending on version and whether it originated from "delete for
+ * everyone" (revoke) or another mechanism:
+ *
+ *   a) `{ event: "messages.delete", data: { key: { id, ... } } }` — singular
+ *   b) `{ event: "messages.delete", data: { keys: [{ id, ... }, ...] } }` — plural
+ *   c) `{ event: "messages.delete", data: { id: "..." } }` — bare id
+ *
+ * Historically we only accepted (a), which is why revokes delivered as (b)
+ * (the Baileys default) fell through to isMessagesUpsert → failed the key
+ * check → got silently dropped. This now accepts all three.
  */
 export function isMessagesDelete(
   payload: EvolutionWebhookPayload,
 ): payload is EvolutionWebhookPayload & { data: EvolutionMessagesUpsertData } {
   const data = payload.data as Record<string, unknown> | undefined;
   if (!data) return false;
-  const hasKey = typeof data.key === "object" && data.key !== null && "id" in (data.key as object);
   const ev = payload.event?.toLowerCase() ?? "";
-  return hasKey && (ev.includes("messages.delete") || ev.includes("messages_delete"));
+  const byEventName = ev.includes("messages.delete") || ev.includes("messages_delete");
+  if (!byEventName) return false;
+
+  // Shape (a): singular key.id
+  if (
+    typeof data.key === "object" &&
+    data.key !== null &&
+    "id" in (data.key as object)
+  ) {
+    return true;
+  }
+  // Shape (b): plural keys[] with at least one id
+  if (Array.isArray(data.keys) && data.keys.length > 0) {
+    const first = data.keys[0];
+    if (first && typeof first === "object" && "id" in first) return true;
+  }
+  // Shape (c): bare id
+  if (typeof data.id === "string" && data.id.length > 0) return true;
+
+  return false;
+}
+
+/**
+ * Extract all waMessageIds targeted by a delete event, regardless of shape.
+ * Returns the list of ids to mark as deleted.
+ */
+export function extractDeleteKeys(
+  data: Record<string, unknown>,
+): Array<{ id: string; remoteJid?: string; fromMe?: boolean }> {
+  const out: Array<{ id: string; remoteJid?: string; fromMe?: boolean }> = [];
+  // Shape (a): singular key
+  if (data.key && typeof data.key === "object") {
+    const k = data.key as Record<string, unknown>;
+    if (typeof k.id === "string") {
+      out.push({
+        id: k.id,
+        remoteJid: typeof k.remoteJid === "string" ? k.remoteJid : undefined,
+        fromMe: typeof k.fromMe === "boolean" ? k.fromMe : undefined,
+      });
+    }
+  }
+  // Shape (b): plural keys[]
+  if (Array.isArray(data.keys)) {
+    for (const k of data.keys) {
+      if (k && typeof k === "object" && typeof (k as Record<string, unknown>).id === "string") {
+        const kr = k as Record<string, unknown>;
+        out.push({
+          id: kr.id as string,
+          remoteJid: typeof kr.remoteJid === "string" ? kr.remoteJid : undefined,
+          fromMe: typeof kr.fromMe === "boolean" ? kr.fromMe : undefined,
+        });
+      }
+    }
+  }
+  // Shape (c): bare id
+  if (out.length === 0 && typeof data.id === "string") {
+    out.push({ id: data.id });
+  }
+  return out;
 }
 
 export function isConnectionUpdate(

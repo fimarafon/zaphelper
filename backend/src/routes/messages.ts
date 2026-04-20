@@ -2,6 +2,7 @@ import type { Prisma, PrismaClient } from "@prisma/client";
 import type { FastifyPluginAsync } from "fastify";
 import { requireAuth } from "../middleware/auth.js";
 import { detectRevoke } from "../services/message-ingest.js";
+import { readWebhookEvents } from "../services/webhook-event-log.js";
 
 export interface MessagesRoutesDeps {
   prisma: PrismaClient;
@@ -139,6 +140,24 @@ export const messagesRoutes: FastifyPluginAsync<MessagesRoutesDeps> = async (
           messageType: updated.messageType,
         },
       };
+    },
+  );
+
+  // DEBUG: recent raw webhook events from the in-memory ring buffer.
+  // Lets us inspect exactly what Evolution sent for delete/edit events.
+  fastify.get<{ Querystring: { filter?: string; limit?: string } }>(
+    "/api/admin/webhook-events",
+    async (req, reply) => {
+      try {
+        requireAuth(req);
+      } catch {
+        return reply.code(401).send({ error: "Unauthorized" });
+      }
+      const events = readWebhookEvents({
+        eventContains: req.query.filter,
+        limit: req.query.limit ? parseInt(req.query.limit, 10) : 50,
+      });
+      return { count: events.length, events };
     },
   );
 

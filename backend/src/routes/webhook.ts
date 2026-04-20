@@ -1,6 +1,7 @@
 import type { FastifyPluginAsync } from "fastify";
 import {
   evolutionWebhookSchema,
+  extractDeleteKeys,
   isConnectionUpdate,
   isMessagesDelete,
   isMessagesUpdate,
@@ -11,6 +12,7 @@ import type { MessageIngest } from "../services/message-ingest.js";
 import type { SelfIdentity } from "../services/self-identity.js";
 import type { PrismaClient } from "@prisma/client";
 import type { AppConfig } from "../config.js";
+import { pushWebhookEvent } from "../services/webhook-event-log.js";
 
 export interface WebhookDeps {
   ingest: MessageIngest;
@@ -34,6 +36,12 @@ export const webhookRoutes: FastifyPluginAsync<WebhookDeps> = async (fastify, de
   const { ingest, dispatcher, selfIdentity, prisma, config } = deps;
 
   fastify.post("/webhook", async (req, reply) => {
+    // Log EVERY inbound event into a ring buffer before any parsing/routing,
+    // so if an event gets dropped we can still see what came in. This is the
+    // ground-truth record for diagnosing "delete didn't work" / "edit didn't
+    // work" / etc. Bounded to the last 200 events to keep memory small.
+    pushWebhookEvent(req.body);
+
     const parsed = evolutionWebhookSchema.safeParse(req.body);
     if (!parsed.success) {
       fastify.log.warn({ issues: parsed.error.issues }, "Malformed webhook payload");
@@ -51,7 +59,7 @@ export const webhookRoutes: FastifyPluginAsync<WebhookDeps> = async (fastify, de
       } else if (isMessagesUpdate(payload)) {
         await handleMessagesUpdate(payload.data as Parameters<MessageIngest["applyUpdate"]>[0]);
       } else if (isMessagesDelete(payload)) {
-        await handleMessagesDelete(payload.data as Parameters<MessageIngest["applyDelete"]>[0]);
+        await handleMessagesDelete(payload.data as Record<string, unknown>);
       } else if (isMessagesUpsert(payload)) {
         await handleMessagesUpsert(payload.data as Parameters<MessageIngest["ingest"]>[0]);
       } else {
@@ -140,10 +148,27 @@ export const webhookRoutes: FastifyPluginAsync<WebhookDeps> = async (fastify, de
     );
   }
 
-  async function handleMessagesDelete(
-    data: Parameters<MessageIngest["applyDelete"]>[0],
-  ): Promise<void> {
-    const result = await ingest.applyDelete(data);
-    fastify.log.info({ deleted: result.deleted }, "Message delete applied");
+  async function handleMessagesDelete(data: Record<string, unknown>): Promise<void> {
+    const keys = extractDeleteKeys(data);
+    if (keys.length === 0) {
+      fastify.log.warn(
+        { dataKeys: Object.keys(data) },
+        "messages.delete received but no keys extractable — shape unknown",
+      );
+      return;
+    }
+    for (const k of keys) {
+      const result = await ingest.applyDelete({
+        key: {
+          id: k.id,
+          remoteJid: k.remoteJid ?? "",
+          fromMe: k.fromMe ?? false,
+        },
+      } as Parameters<MessageIngest["applyDelete"]>[0]);
+      fastify.log.info(
+        { waMessageId: k.id, deleted: result.deleted },
+        "Message delete applied",
+      );
+    }
   }
 };
