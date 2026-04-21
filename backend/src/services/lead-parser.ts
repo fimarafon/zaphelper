@@ -69,11 +69,14 @@ const CANONICAL_SOURCES: Array<{
   {
     canonical: "Angi",
     aliases: [
-      "angi", "angie", "angis", "angi's", "angy",
+      "angi", "angie", "angis", "angi's",
       "angie's list", "angieslist", "angislist", "angies list",
-      "angi ads", "angi pro", "ang",
+      "angi ads", "angi pro",
+      // NOTE: "ang" and "angy" were removed — they caused false positives
+      // on common English words ("any" → "angy" via Lev 1, "angry"/"angle"
+      // → "ang" via prefix). Keeping only aliases that are distinctive.
     ],
-    fuzzyRoots: ["angi", "angy"],
+    fuzzyRoots: ["angi"],
   },
   {
     canonical: "Yelp",
@@ -179,14 +182,19 @@ export function detectSource(text: string): string | null {
   // --- Pass 2: fuzzy per-word Levenshtein match ---
   // For each word in the text, find the closest single-word alias and accept
   // if the distance is small relative to the word length.
+  //
+  // IMPORTANT: aliases shorter than 5 chars are EXACT-only (handled in pass 1).
+  // Fuzzy matching on short aliases produces false positives like
+  // "any" → "angy" (Angi) or "and" → "ang". Only match fuzzy on distinctive,
+  // longer aliases.
   for (const word of words) {
-    if (word.length < 3) continue;
+    if (word.length < 4) continue; // words < 4 chars too ambiguous
     for (const { canonical, aliases } of CANONICAL_SOURCES) {
       for (const alias of aliases) {
         if (alias.includes(" ")) continue; // phrases handled in pass 1
+        if (alias.length < 5) continue;    // short aliases exact-only
         if (Math.abs(alias.length - word.length) > 2) continue;
         const dist = levenshtein(word, alias);
-        // 0-1 chars off for short aliases (3-5), 2 chars for longer
         const threshold = alias.length >= 6 ? 2 : 1;
         if (dist <= threshold) return canonical;
       }
