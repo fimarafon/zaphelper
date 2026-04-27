@@ -68,6 +68,26 @@ export const instanceRoutes: FastifyPluginAsync<InstanceRoutesDeps> = async (
     };
   });
 
+  // DEBUG: probe isSelfChatJid() with arbitrary input. Used to verify whether
+  // the deployed binary actually has the new self-chat detection logic.
+  fastify.get<{ Querystring: { jid?: string } }>(
+    "/api/admin/probe-self-chat",
+    async (req, reply) => {
+      try {
+        requireAuth(req);
+      } catch {
+        return reply.code(401).send({ error: "Unauthorized" });
+      }
+      const jid = req.query.jid ?? "";
+      return {
+        input: jid,
+        selfJid: selfIdentity.getJid(),
+        selfLid: selfIdentity.getLid(),
+        isSelfChat: selfIdentity.isSelfChatJid(jid),
+      };
+    },
+  );
+
   // Manually set the user's WhatsApp LID. Used when the new privacy protocol
   // routes self-chat messages with a LID-style remoteJid that doesn't match
   // our stored phone JID. Also retroactively flags any past messages in that
