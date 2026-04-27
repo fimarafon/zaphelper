@@ -12,7 +12,7 @@ import type { MessageIngest } from "../services/message-ingest.js";
 import type { SelfIdentity } from "../services/self-identity.js";
 import type { PrismaClient } from "@prisma/client";
 import type { AppConfig } from "../config.js";
-import { pushWebhookEvent } from "../services/webhook-event-log.js";
+import { pushWebhookEvent, tagWebhookOutcome } from "../services/webhook-event-log.js";
 
 export interface WebhookDeps {
   ingest: MessageIngest;
@@ -40,11 +40,16 @@ export const webhookRoutes: FastifyPluginAsync<WebhookDeps> = async (fastify, de
     // so if an event gets dropped we can still see what came in. This is the
     // ground-truth record for diagnosing "delete didn't work" / "edit didn't
     // work" / etc. Bounded to the last 200 events to keep memory small.
-    pushWebhookEvent(req.body);
+    const waMessageId = pushWebhookEvent(req.body);
 
     const parsed = evolutionWebhookSchema.safeParse(req.body);
     if (!parsed.success) {
       fastify.log.warn({ issues: parsed.error.issues }, "Malformed webhook payload");
+      tagWebhookOutcome(
+        waMessageId,
+        "malformed",
+        JSON.stringify(parsed.error.issues).slice(0, 200),
+      );
       return reply.code(200).send({ ok: true, ignored: "malformed" });
     }
 
@@ -56,17 +61,35 @@ export const webhookRoutes: FastifyPluginAsync<WebhookDeps> = async (fastify, de
       // and only the event name distinguishes them.
       if (isConnectionUpdate(payload)) {
         await handleConnectionUpdate(payload.data as Record<string, unknown>);
+        tagWebhookOutcome(waMessageId, "connection_update");
       } else if (isMessagesUpdate(payload)) {
         await handleMessagesUpdate(payload.data as Parameters<MessageIngest["applyUpdate"]>[0]);
+        tagWebhookOutcome(waMessageId, "messages_update");
       } else if (isMessagesDelete(payload)) {
         await handleMessagesDelete(payload.data as Record<string, unknown>);
+        tagWebhookOutcome(waMessageId, "messages_delete");
       } else if (isMessagesUpsert(payload)) {
-        await handleMessagesUpsert(payload.data as Parameters<MessageIngest["ingest"]>[0]);
+        const result = await handleMessagesUpsert(
+          payload.data as Parameters<MessageIngest["ingest"]>[0],
+        );
+        tagWebhookOutcome(
+          waMessageId,
+          result.outcome,
+          result.detail,
+        );
       } else {
         fastify.log.debug({ event: payload.event }, "Unhandled webhook event");
+        tagWebhookOutcome(waMessageId, "unhandled_event");
       }
     } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      const stack = err instanceof Error ? err.stack?.split("\n").slice(0, 5).join(" | ") : undefined;
       fastify.log.error({ err, event: payload.event }, "Webhook handler error");
+      tagWebhookOutcome(
+        waMessageId,
+        "handler_error",
+        `${msg} :: ${stack ?? ""}`.slice(0, 500),
+      );
     }
 
     return reply.code(200).send({ ok: true });
@@ -108,13 +131,15 @@ export const webhookRoutes: FastifyPluginAsync<WebhookDeps> = async (fastify, de
 
   async function handleMessagesUpsert(
     data: Parameters<MessageIngest["ingest"]>[0],
-  ): Promise<void> {
+  ): Promise<{ outcome: string; detail?: string }> {
     const result = await ingest.ingest(data);
     if (result.duplicate) {
       fastify.log.debug("Dedupe: message already stored");
-      return;
+      return { outcome: "duplicate" };
     }
-    if (!result.saved) return;
+    if (!result.saved) {
+      return { outcome: "not_saved" };
+    }
 
     // Fire-and-forget command dispatch — do NOT await.
     if (result.isSelfCommand) {
@@ -136,6 +161,11 @@ export const webhookRoutes: FastifyPluginAsync<WebhookDeps> = async (fastify, de
           });
       });
     }
+
+    return {
+      outcome: "saved",
+      detail: `selfCmd=${result.isSelfCommand} delegateCmd=${result.isDelegateCommand} chatId=${result.saved.chatId} isSelfChat=${result.saved.isSelfChat}`,
+    };
   }
 
   async function handleMessagesUpdate(

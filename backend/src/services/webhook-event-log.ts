@@ -21,11 +21,15 @@ export interface CapturedWebhookEvent {
   rawJson: string;
   /** Convenience: top-level keys of payload.data if it's an object. */
   dataKeys: string[];
+  /** Result trace — set after the handler runs, lets us see the path taken. */
+  outcome: string | null;
+  outcomeDetail: string | null;
 }
 
 const ring: CapturedWebhookEvent[] = [];
+const idIndex = new Map<string, CapturedWebhookEvent>();
 
-export function pushWebhookEvent(body: unknown): void {
+export function pushWebhookEvent(body: unknown): string | null {
   try {
     let raw = typeof body === "string" ? body : JSON.stringify(body);
     if (raw.length > MAX_PAYLOAD_BYTES) {
@@ -34,27 +38,61 @@ export function pushWebhookEvent(body: unknown): void {
 
     let eventName: string | null = null;
     let dataKeys: string[] = [];
+    let waMessageId: string | null = null;
     if (body && typeof body === "object") {
       const b = body as Record<string, unknown>;
       const ev = b.event;
       if (typeof ev === "string") eventName = ev;
-      const data = b.data;
+      const data = b.data as Record<string, unknown> | undefined;
       if (data && typeof data === "object") {
-        dataKeys = Object.keys(data as Record<string, unknown>);
+        dataKeys = Object.keys(data);
+        const key = data.key as Record<string, unknown> | undefined;
+        if (key && typeof key.id === "string") waMessageId = key.id;
       }
     }
 
-    ring.push({
+    const entry: CapturedWebhookEvent = {
       receivedAt: new Date().toISOString(),
       eventName,
       rawJson: raw,
       dataKeys,
-    });
+      outcome: null,
+      outcomeDetail: null,
+    };
+    ring.push(entry);
+    if (waMessageId) idIndex.set(waMessageId, entry);
 
-    while (ring.length > MAX_EVENTS) ring.shift();
+    while (ring.length > MAX_EVENTS) {
+      const removed = ring.shift();
+      if (removed) {
+        // Best-effort cleanup of idIndex on rotation.
+        for (const [k, v] of idIndex.entries()) {
+          if (v === removed) idIndex.delete(k);
+        }
+      }
+    }
+
+    return waMessageId;
   } catch {
-    // Never let logging failures affect webhook processing.
+    return null;
   }
+}
+
+/**
+ * Annotate the most recently captured event for a given waMessageId with
+ * the result of processing. Lets debug endpoints answer "what happened to
+ * the message I just sent?" definitively.
+ */
+export function tagWebhookOutcome(
+  waMessageId: string | null | undefined,
+  outcome: string,
+  detail?: string,
+): void {
+  if (!waMessageId) return;
+  const entry = idIndex.get(waMessageId);
+  if (!entry) return;
+  entry.outcome = outcome;
+  entry.outcomeDetail = detail ?? null;
 }
 
 export function readWebhookEvents(filter?: {
