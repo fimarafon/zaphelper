@@ -57,16 +57,21 @@ const connectionUpdateDataSchema = z
   })
   .passthrough();
 
+// IMPORTANT: every optional field on the outer payload uses .nullish() not
+// .optional() — Evolution v2.2.3 sends literal `null` for many fields
+// (notably `apikey`) instead of omitting them. Zod's .optional() only
+// accepts undefined, so .nullish() (= optional + nullable) is required to
+// avoid rejecting EVERY webhook as malformed.
 export const evolutionWebhookSchema = z
   .object({
-    event: z.string().optional(),
-    instance: z.string().optional(),
+    event: z.string().nullish(),
+    instance: z.string().nullish(),
     data: z.union([messagesUpsertDataSchema, connectionUpdateDataSchema, z.record(z.unknown())]),
-    destination: z.string().optional(),
-    date_time: z.string().optional(),
-    sender: z.string().optional(),
-    server_url: z.string().optional(),
-    apikey: z.string().optional(),
+    destination: z.string().nullish(),
+    date_time: z.string().nullish(),
+    sender: z.string().nullish(),
+    server_url: z.string().nullish(),
+    apikey: z.string().nullish(),
   })
   .passthrough();
 
