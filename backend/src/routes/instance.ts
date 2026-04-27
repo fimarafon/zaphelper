@@ -64,8 +64,49 @@ export const instanceRoutes: FastifyPluginAsync<InstanceRoutesDeps> = async (
       rawState: state,
       selfJid: selfIdentity.getJid(),
       selfPhone: selfIdentity.getPhone(),
+      selfLid: selfIdentity.getLid(),
     };
   });
+
+  // Manually set the user's WhatsApp LID. Used when the new privacy protocol
+  // routes self-chat messages with a LID-style remoteJid that doesn't match
+  // our stored phone JID. Also retroactively flags any past messages in that
+  // chat as isSelfChat=true so the dashboard reflects the truth.
+  fastify.post<{ Body: { lid: string } }>(
+    "/api/admin/set-self-lid",
+    async (req, reply) => {
+      try {
+        requireAuth(req);
+      } catch {
+        return reply.code(401).send({ error: "Unauthorized" });
+      }
+      const lid = (req.body?.lid ?? "").trim().replace(/@.*$/, "");
+      if (!/^\d{6,}$/.test(lid)) {
+        return reply
+          .code(400)
+          .send({ error: "Invalid LID — must be at least 6 digits" });
+      }
+
+      await selfIdentity.setSelfLid(lid);
+
+      // Retrofit: every fromMe DM in this chat retroactively becomes a self-chat.
+      const updated = await prisma.message.updateMany({
+        where: {
+          chatId: lid,
+          isFromMe: true,
+          isGroup: false,
+          isSelfChat: false,
+        },
+        data: { isSelfChat: true },
+      });
+
+      return {
+        ok: true,
+        lid,
+        retrofitted: updated.count,
+      };
+    },
+  );
 
   // Ensure instance exists, then return a QR code to scan.
   fastify.post("/api/instance/connect", async (req, reply) => {

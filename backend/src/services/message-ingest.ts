@@ -424,8 +424,35 @@ export class MessageIngest {
 
     const timestamp = resolveTimestamp(data.messageTimestamp);
 
-    const selfJid = this.selfIdentity.getJid();
-    const isSelfChat = fromMe && selfJid !== null && remoteJid === selfJid;
+    // Self-chat detection. WhatsApp + Baileys + new privacy protocol routes
+    // self-messages with a LID-style remoteJid (e.g. "90306099822759") rather
+    // than the user's phone JID. SelfIdentity.isSelfChatJid() checks both.
+    //
+    // Auto-detect LID from group messages we send: when fromMe=true && isGroup,
+    // key.participant is the user's identifier in that group — and in the new
+    // privacy protocol, that's their LID. Capture it once.
+    if (
+      fromMe &&
+      isGroup &&
+      key.participant &&
+      !this.selfIdentity.getLid()
+    ) {
+      const candidateLid = jidToChatId(key.participant);
+      // Sanity: must look like a non-trivial id, NOT just our phone (which
+      // would mean we're on the legacy protocol and don't need a LID).
+      const phoneFromJid = this.selfIdentity.getPhone();
+      if (candidateLid && candidateLid !== phoneFromJid) {
+        this.logger.info(
+          { candidateLid, fromGroup: remoteJid },
+          "Captured self-LID from fromMe group message",
+        );
+        void this.selfIdentity
+          .setSelfLid(candidateLid)
+          .catch((err) => this.logger.warn({ err }, "setSelfLid failed"));
+      }
+    }
+
+    const isSelfChat = fromMe && this.selfIdentity.isSelfChatJid(remoteJid);
 
     // Resolve senderName: prefer manual mapping, then pushName if it's a real
     // name (not just digits = unresolved LID).
