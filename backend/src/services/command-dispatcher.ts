@@ -45,6 +45,11 @@ export class CommandDispatcher {
       return;
     }
 
+    // Reply destination: the chat the command came from. For self-chat this
+    // is your own LID; for DMs with someone else (e.g. Jack) it's their phone.
+    // Either way, sendText to chatId routes the reply back to the same chat.
+    const replyTo = message.chatId || selfPhone;
+
     // Smart parse: handles both "/status 04/09" and "/status04/09" (no space).
     const withoutSlash = content.slice(1).trim();
     const parsed = this.registry.parseCommandLine(withoutSlash);
@@ -65,7 +70,7 @@ export class CommandDispatcher {
         },
       });
       const reply = `❓ Unknown command: /${cmdName}\nUse /help to see available commands.`;
-      await this.safeSend(selfPhone, reply);
+      await this.safeSend(replyTo, reply);
       return;
     }
 
@@ -99,7 +104,7 @@ export class CommandDispatcher {
 
     try {
       const result = await cmd.execute(ctx);
-      await this.safeSend(selfPhone, result.reply);
+      await this.safeSend(replyTo, result.reply);
       await this.prisma.commandLog.update({
         where: { id: logRow.id },
         data: {
@@ -113,7 +118,7 @@ export class CommandDispatcher {
       const msg = err instanceof Error ? err.message : String(err);
       this.logger.error({ err, cmd: cmd.name }, "Command execution failed");
       const reply = `💥 Error running /${cmd.name}:\n${msg}`;
-      await this.safeSend(selfPhone, reply);
+      await this.safeSend(replyTo, reply);
       await this.prisma.commandLog.update({
         where: { id: logRow.id },
         data: {

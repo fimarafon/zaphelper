@@ -527,7 +527,11 @@ export class MessageIngest {
         },
       });
 
-      const isSelfCommand = isSelfChat && content.trim().startsWith("/");
+      // Trigger commands when YOU type / in any DM (self-chat OR with someone
+      // else). Reply goes back to the same chat. Risk: if you accidentally type
+      // /statustoday in a chat with a friend/client, the lead list goes to them.
+      const isSelfCommand =
+        fromMe && !isGroup && content.trim().startsWith("/");
 
       // Delegate command detection:
       // - NOT from me (someone else sent it)
