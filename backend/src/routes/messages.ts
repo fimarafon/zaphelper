@@ -143,6 +143,69 @@ export const messagesRoutes: FastifyPluginAsync<MessagesRoutesDeps> = async (
     },
   );
 
+  // Manually insert a message row that wasn't captured via webhook (e.g. one
+  // that arrived during a downtime window or a broken-validation period).
+  // Used to recover lost leads from the WhatsApp chat export.
+  fastify.post<{
+    Body: {
+      content: string;
+      senderName: string;
+      senderPhone?: string;
+      chatId?: string;
+      chatName?: string;
+      timestamp: string; // ISO
+      isGroup?: boolean;
+      waMessageId?: string; // optional override for idempotency
+    };
+  }>("/api/admin/insert-message", async (req, reply) => {
+    try {
+      requireAuth(req);
+    } catch {
+      return reply.code(401).send({ error: "Unauthorized" });
+    }
+    const b = req.body;
+    if (!b?.content || !b.senderName || !b.timestamp) {
+      return reply
+        .code(400)
+        .send({ error: "content, senderName, and timestamp are required" });
+    }
+    // Default to Be Home Leads Scheduled group
+    const chatId = b.chatId ?? "120363396996770368";
+    const chatName = b.chatName ?? "Be Home Leads Scheduled";
+    const isGroup = b.isGroup ?? true;
+    const waMessageId =
+      b.waMessageId ?? `manual-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+    const ts = new Date(b.timestamp);
+    if (Number.isNaN(ts.getTime())) {
+      return reply.code(400).send({ error: "invalid timestamp" });
+    }
+
+    const row = await prisma.message.create({
+      data: {
+        waMessageId,
+        chatId,
+        chatName,
+        senderName: b.senderName,
+        senderPhone: b.senderPhone ?? null,
+        content: b.content,
+        rawMessage: {
+          _manualInsert: true,
+          _insertedAt: new Date().toISOString(),
+        } as unknown as Prisma.InputJsonValue,
+        messageType: "TEXT",
+        isGroup,
+        isFromMe: false,
+        isSelfChat: false,
+        timestamp: ts,
+      },
+    });
+
+    return {
+      ok: true,
+      message: { id: row.id, waMessageId: row.waMessageId, timestamp: row.timestamp },
+    };
+  });
+
   // DEBUG: recent raw webhook events from the in-memory ring buffer.
   // Lets us inspect exactly what Evolution sent for delete/edit events.
   fastify.get<{ Querystring: { filter?: string; limit?: string } }>(
