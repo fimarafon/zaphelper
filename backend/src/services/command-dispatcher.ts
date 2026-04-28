@@ -170,12 +170,29 @@ export class CommandDispatcher {
     const content = message.content.trim();
     if (!content.startsWith("/")) return;
 
+    // Resolve the reply target: delegatePhone may be a LID (15+ digits with
+    // no @suffix). Evolution sendText only accepts phone JIDs, so map LID →
+    // phone. Falls back to the original delegatePhone if resolution fails
+    // (likely sendText error then, but at least we tried).
+    let replyTo = delegatePhone;
+    if (/^\d+$/.test(delegatePhone) && delegatePhone.length > 13) {
+      const resolved = await this.resolveLidCached(delegatePhone);
+      if (resolved) {
+        replyTo = resolved;
+      } else {
+        this.logger.warn(
+          { delegatePhone, fallback: "as-is" },
+          "LID resolution failed for delegate reply",
+        );
+      }
+    }
+
     const withoutSlash = content.slice(1).trim();
     const parsed = this.registry.parseCommandLine(withoutSlash);
 
     if (!parsed) {
       const firstToken = withoutSlash.split(/\s+/)[0] ?? "";
-      await this.safeSend(delegatePhone, `❓ Unknown command: /${firstToken}`);
+      await this.safeSend(replyTo, `❓ Unknown command: /${firstToken}`);
       return;
     }
 
@@ -224,7 +241,7 @@ export class CommandDispatcher {
     try {
       const result = await cmd.execute(ctx);
       // Reply goes to the DELEGATE, not self-chat
-      await this.safeSend(delegatePhone, result.reply);
+      await this.safeSend(replyTo, result.reply);
       await this.prisma.commandLog.update({
         where: { id: logRow.id },
         data: {
@@ -237,7 +254,7 @@ export class CommandDispatcher {
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       this.logger.error({ err, cmd: cmd.name, delegate: delegatePhone }, "Delegate command failed");
-      await this.safeSend(delegatePhone, `💥 Error: ${msg}`);
+      await this.safeSend(replyTo, `💥 Error: ${msg}`);
       await this.prisma.commandLog.update({
         where: { id: logRow.id },
         data: { status: "FAILURE", error: msg, durationMs: Date.now() - start },

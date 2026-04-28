@@ -88,6 +88,32 @@ export const instanceRoutes: FastifyPluginAsync<InstanceRoutesDeps> = async (
     },
   );
 
+  // Manually map a LID → phone for any contact. Used when automatic
+  // resolution (profilePicUrl match) fails — e.g. when the contact has no
+  // profile picture set, the resolver has nothing to bridge LID and phone.
+  // Stored in Config under key=`lid:<LID>` so the dispatcher cache reads it.
+  fastify.post<{ Body: { lid: string; phone: string } }>(
+    "/api/admin/lid-mapping",
+    async (req, reply) => {
+      try {
+        requireAuth(req);
+      } catch {
+        return reply.code(401).send({ error: "Unauthorized" });
+      }
+      const lid = (req.body?.lid ?? "").replace(/@.*$/, "").trim();
+      const phone = (req.body?.phone ?? "").replace(/\D/g, "");
+      if (!/^\d{6,}$/.test(lid) || !/^\d{6,}$/.test(phone)) {
+        return reply.code(400).send({ error: "lid and phone must be digits" });
+      }
+      await prisma.config.upsert({
+        where: { key: `lid:${lid}` },
+        create: { key: `lid:${lid}`, value: phone },
+        update: { value: phone },
+      });
+      return { ok: true, lid, phone };
+    },
+  );
+
   // Manually set the user's WhatsApp LID. Used when the new privacy protocol
   // routes self-chat messages with a LID-style remoteJid that doesn't match
   // our stored phone JID. Also retroactively flags any past messages in that
