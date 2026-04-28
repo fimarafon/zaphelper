@@ -112,6 +112,19 @@ const CANONICAL_SOURCES: Array<{
     ],
     fuzzyRoots: ["refer", "referr"],
   },
+  {
+    canonical: "Home Show",
+    aliases: [
+      // Multi-word forms (matched as phrase substring in pass 1)
+      "home show", "the home show", "home shows", "home-show", "home-shows",
+      // Single-word variants (typos)
+      "homeshow", "homeshows", "homshow", "homeshw", "homshw",
+      "hmeshow", "homshoe", "homeshoe",
+    ],
+    // Fuzzy root must be ≥5 chars to avoid matching "home" / "show" alone
+    // (very common words). "homesh" is distinctive and prefix-stable.
+    fuzzyRoots: ["homesh"],
+  },
 ];
 
 /**
