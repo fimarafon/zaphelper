@@ -130,6 +130,25 @@ export class MessageIngest {
       return { saved: false, duplicate: true };
     }
 
+    // Same edit interception as ingest() — backfill might pull historical
+    // edits we missed because of webhook downtime / decoding bugs.
+    const editInSync = detectEdit(record.message);
+    if (editInSync) {
+      await this.applyUpdate({
+        key: {
+          id: editInSync.editedMessageId,
+          remoteJid: editInSync.editedRemoteJid ?? key.remoteJid,
+          fromMe: editInSync.editedFromMe ?? key.fromMe ?? false,
+        },
+        message: editInSync.newBody,
+      } as EvolutionMessagesUpsertData);
+      this.logger.info(
+        { editedId: editInSync.editedMessageId, editEventId: key.id },
+        "Handled protocolMessage MESSAGE_EDIT during backfill",
+      );
+      return { saved: false, duplicate: true, updated: true };
+    }
+
     // Normalize the message body: Evolution's record.message is the raw Baileys
     // body, which matches what the webhook handler already knows how to parse.
     const messageBody = (record.message ?? {}) as EvolutionMessageBody;
@@ -409,6 +428,29 @@ export class MessageIngest {
       return { saved: null, duplicate: false, isSelfCommand: false, isDelegateCommand: false, delegatePhone: null };
     }
 
+    // Intercept "Edit message" (protocolMessage type 14). When the user edits
+    // a previously-sent message, Baileys/Evolution deliver this as a
+    // messages.upsert with a protocolMessage holding both the original key.id
+    // and the new content under editedMessage. Without this, edits become
+    // stray rows in DB and the original keeps its outdated content (e.g. the
+    // Pauline lead with "(not sure)" instead of "Google" after edit).
+    const edit = detectEdit(data.message);
+    if (edit) {
+      await this.applyUpdate({
+        key: {
+          id: edit.editedMessageId,
+          remoteJid: edit.editedRemoteJid ?? key.remoteJid ?? "",
+          fromMe: edit.editedFromMe ?? key.fromMe ?? false,
+        },
+        message: edit.newBody,
+      } as EvolutionMessagesUpsertData);
+      this.logger.info(
+        { editedId: edit.editedMessageId, editEventId: key.id },
+        "Handled protocolMessage MESSAGE_EDIT",
+      );
+      return { saved: null, duplicate: false, isSelfCommand: false, isDelegateCommand: false, delegatePhone: null };
+    }
+
     const remoteJid = key.remoteJid;
     const isGroup = isGroupJid(remoteJid);
     const fromMe = Boolean(key.fromMe);
@@ -613,10 +655,11 @@ export function extractContent(body: EvolutionMessageBody): {
  * the original stays in /statustoday forever.
  *
  * protocolMessage types (from waproto.Message.ProtocolMessage.Type):
- *   0 = REVOKE                    <- "delete for everyone"
- *   8 = MESSAGE_EDIT              <- "edit message"
- *   14 = REVOKE (alternate code used in newer Baileys)
- * We accept the string "REVOKE" or numeric 0/14.
+ *   0  = REVOKE          <- "delete for everyone"
+ *   14 = MESSAGE_EDIT    <- "edit message" (NOT a revoke — we used to confuse these)
+ *
+ * We split detection: detectRevoke matches type 0 / "REVOKE" only,
+ * detectEdit matches type 14 / "MESSAGE_EDIT" and returns the new content.
  */
 export interface RevokeDetection {
   revokedMessageId: string;
@@ -631,11 +674,10 @@ export function detectRevoke(
   const proto = (body as { protocolMessage?: unknown }).protocolMessage;
   if (!proto || typeof proto !== "object") return null;
   const type = (proto as { type?: unknown }).type;
-  // Baileys sends numeric enum; Evolution sometimes stringifies it.
+  // ONLY type 0 / "REVOKE" — type 14 is MESSAGE_EDIT, handled separately
   const isRevoke =
     type === 0 ||
-    type === 14 ||
-    (typeof type === "string" && type.toUpperCase().includes("REVOKE"));
+    (typeof type === "string" && type.toUpperCase().includes("REVOKE") && !type.toUpperCase().includes("EDIT"));
   if (!isRevoke) return null;
   const revokedKey = (proto as { key?: Record<string, unknown> }).key;
   if (!revokedKey || typeof revokedKey.id !== "string") return null;
@@ -644,6 +686,46 @@ export function detectRevoke(
     revokedFromMe: typeof revokedKey.fromMe === "boolean" ? revokedKey.fromMe : undefined,
     revokedRemoteJid:
       typeof revokedKey.remoteJid === "string" ? revokedKey.remoteJid : undefined,
+  };
+}
+
+/**
+ * Detects a "Edit message" protocolMessage. Returns the original message id
+ * and the new content body so the caller can apply the edit.
+ *
+ * Baileys ProtocolMessage shape for edit:
+ *   {
+ *     type: 14,                              // MESSAGE_EDIT
+ *     key: { id: <originalMessageId>, ... }, // points at original
+ *     editedMessage: { conversation: "...", extendedTextMessage: {...}, ... }
+ *   }
+ */
+export interface EditDetection {
+  editedMessageId: string;
+  newBody: EvolutionMessageBody;
+  editedFromMe: boolean | undefined;
+  editedRemoteJid: string | undefined;
+}
+
+export function detectEdit(body: unknown): EditDetection | null {
+  if (!body || typeof body !== "object") return null;
+  const proto = (body as { protocolMessage?: unknown }).protocolMessage;
+  if (!proto || typeof proto !== "object") return null;
+  const type = (proto as { type?: unknown }).type;
+  const isEdit =
+    type === 14 ||
+    (typeof type === "string" && type.toUpperCase().includes("EDIT"));
+  if (!isEdit) return null;
+  const key = (proto as { key?: Record<string, unknown> }).key;
+  const edited = (proto as { editedMessage?: unknown }).editedMessage;
+  if (!key || typeof key.id !== "string") return null;
+  if (!edited || typeof edited !== "object") return null;
+  return {
+    editedMessageId: key.id,
+    newBody: edited as EvolutionMessageBody,
+    editedFromMe: typeof key.fromMe === "boolean" ? key.fromMe : undefined,
+    editedRemoteJid:
+      typeof key.remoteJid === "string" ? key.remoteJid : undefined,
   };
 }
 
