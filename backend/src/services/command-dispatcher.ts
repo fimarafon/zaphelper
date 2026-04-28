@@ -18,6 +18,9 @@ import type { IngestedMessage } from "./message-ingest.js";
  */
 export class CommandDispatcher {
   private readonly logger: Logger;
+  // Cache LID → phone for the lifetime of the process. Persisted in Config
+  // so it survives restarts (key = `lid:<lid>`, value = phone digits).
+  private readonly lidCache = new Map<string, string>();
 
   constructor(
     private readonly prisma: PrismaClient,
@@ -45,11 +48,29 @@ export class CommandDispatcher {
       return;
     }
 
-    // Reply destination: self-chat → selfPhone (your own number).
-    // Reverted from "any DM" because Evolution v2.2.3 sendText rejects LID
-    // recipients (400 "exists:false") and most non-delegate contacts route
-    // by LID not phone.
-    const replyTo = selfPhone;
+    // Reply destination resolution:
+    //   - Self-chat → selfPhone (your own number)
+    //   - DM with someone else → message.chatId IF it's already a phone, OR
+    //     resolve LID→phone via profilePicUrl match.
+    //   - Falls back to selfPhone if resolution fails (so command never silently drops).
+    let replyTo = selfPhone;
+    const chatId = message.chatId;
+    if (chatId && chatId !== selfPhone && /^\d+$/.test(chatId)) {
+      // chatId is digits — could be a phone OR an LID. Try as-is first; if it's
+      // a LID (length > 13), try resolving.
+      if (chatId.length <= 13) {
+        replyTo = chatId; // looks like phone
+      } else {
+        const resolved = await this.resolveLidCached(chatId);
+        replyTo = resolved ?? selfPhone;
+        if (!resolved) {
+          this.logger.warn(
+            { chatId, fallback: "selfPhone" },
+            "LID resolution failed for command reply — sending to self-chat",
+          );
+        }
+      }
+    }
 
     // Smart parse: handles both "/status 04/09" and "/status04/09" (no space).
     const withoutSlash = content.slice(1).trim();
@@ -323,6 +344,37 @@ export class CommandDispatcher {
       });
       return { success: false, reply, error: msg };
     }
+  }
+
+  /**
+   * Resolve a LID to a phone number, with multi-tier caching:
+   *   1. In-memory map (instant)
+   *   2. Config table (persists across restarts: key=`lid:<id>`)
+   *   3. Evolution profilePicUrl match (slow but authoritative)
+   * Stores the result in BOTH layers on success so future calls are cheap.
+   */
+  private async resolveLidCached(lid: string): Promise<string | null> {
+    const bare = lid.replace(/@.*$/, "");
+    if (this.lidCache.has(bare)) return this.lidCache.get(bare) ?? null;
+
+    const cfg = await this.prisma.config.findUnique({
+      where: { key: `lid:${bare}` },
+    });
+    if (cfg?.value) {
+      this.lidCache.set(bare, cfg.value);
+      return cfg.value;
+    }
+
+    const phone = await this.evolution.resolveLidToPhone(bare);
+    if (phone) {
+      this.lidCache.set(bare, phone);
+      await this.prisma.config.upsert({
+        where: { key: `lid:${bare}` },
+        create: { key: `lid:${bare}`, value: phone },
+        update: { value: phone },
+      });
+    }
+    return phone;
   }
 
   private async safeSend(phone: string, text: string): Promise<void> {

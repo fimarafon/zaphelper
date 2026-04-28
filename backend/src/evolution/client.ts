@@ -288,7 +288,7 @@ export class EvolutionClient {
    * (phone number) and `pushName` (resolved display name if known).
    */
   async fetchAllContacts(): Promise<
-    Array<{ remoteJid: string; pushName: string | null }>
+    Array<{ remoteJid: string; pushName: string | null; profilePicUrl?: string | null }>
   > {
     try {
       const res = await this.request<Array<Record<string, unknown>>>(
@@ -302,10 +302,67 @@ export class EvolutionClient {
         .map((c) => ({
           remoteJid: c.remoteJid as string,
           pushName: (c.pushName as string | undefined) ?? null,
+          profilePicUrl: (c.profilePicUrl as string | undefined) ?? null,
         }));
     } catch (err) {
       this.logger.warn({ err }, "fetchAllContacts failed");
       return [];
+    }
+  }
+
+  /**
+   * Resolve a LID-style chatId (e.g. "107498988158978" or with @lid suffix)
+   * to its real phone-number JID by matching profilePicUrl across the
+   * contacts and chats tables in Evolution.
+   *
+   * Why this is needed: Evolution v2.2.3 routes saved-contact DMs via LID,
+   * but its sendText only accepts phone-number JIDs. We bridge the two by
+   * walking the contacts list, finding the contact whose profilePicUrl
+   * matches the LID's profilePicUrl, and returning that contact's phone.
+   *
+   * Returns the bare phone digits (e.g. "16198886147") or null if no match.
+   */
+  async resolveLidToPhone(lid: string): Promise<string | null> {
+    const bare = lid.replace(/@.*$/, "");
+    if (!/^\d+$/.test(bare)) return null;
+    try {
+      // 1. Get the LID-side chat record (has profilePicUrl)
+      const chats = await this.request<Array<Record<string, unknown>>>(
+        "POST",
+        `/chat/findChats/${encodeURIComponent(this.instanceName)}`,
+        {},
+      );
+      if (!Array.isArray(chats)) return null;
+      const lidChat = chats.find(
+        (c) => typeof c.remoteJid === "string" && c.remoteJid === `${bare}@lid`,
+      );
+      const lidPic = lidChat?.profilePicUrl as string | undefined;
+      if (!lidPic) return null;
+
+      // Pic URLs include a unique media id like "143905941_449350820323791".
+      // The query-string changes (oh=, oe=) but the path prefix is stable.
+      const picMatch = lidPic.match(/\/([0-9_]+_n\.jpg)/);
+      if (!picMatch || !picMatch[1]) return null;
+      const picId: string = picMatch[1];
+
+      // 2. Walk contacts, find phone-JID with same picId
+      const contacts = await this.fetchAllContacts();
+      for (const c of contacts) {
+        if (!c.remoteJid.endsWith("@s.whatsapp.net")) continue;
+        if (!c.profilePicUrl) continue;
+        if (c.profilePicUrl.includes(picId)) {
+          const phone = c.remoteJid.replace("@s.whatsapp.net", "");
+          this.logger.info(
+            { lid: bare, phone, name: c.pushName },
+            "Resolved LID → phone via profilePicUrl",
+          );
+          return phone;
+        }
+      }
+      return null;
+    } catch (err) {
+      this.logger.warn({ err, lid }, "resolveLidToPhone failed");
+      return null;
     }
   }
 

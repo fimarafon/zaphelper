@@ -527,11 +527,11 @@ export class MessageIngest {
         },
       });
 
-      // Self-commands fire ONLY in your self-chat. We tried widening to "any DM
-      // you send /command in" but Evolution v2.2.3 can't sendText to LIDs (most
-      // saved contacts route via LID, not phone). Until we wire LID→phone
-      // resolution via Evolution's contacts API, restrict to self-chat.
-      const isSelfCommand = isSelfChat && content.trim().startsWith("/");
+      // Self-commands fire when YOU type /command in any DM (self-chat OR
+      // with someone else). Reply destination is resolved in the dispatcher
+      // via LID→phone profilePicUrl match for non-self DMs.
+      const isSelfCommand =
+        fromMe && !isGroup && content.trim().startsWith("/");
 
       // Delegate command detection:
       // - NOT from me (someone else sent it)
