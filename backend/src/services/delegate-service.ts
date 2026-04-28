@@ -14,7 +14,7 @@ const DEFAULT_ALLOWED_PREFIXES = [
 ];
 
 export class DelegateService {
-  /** In-memory cache: phone → Delegate. Refreshed on any mutation. */
+  /** In-memory cache: phone OR lid → Delegate. Refreshed on any mutation. */
   private cache = new Map<string, Delegate>();
   private loaded = false;
 
@@ -31,24 +31,40 @@ export class DelegateService {
     for (const d of rows) {
       this.cache.set(d.phone, d);
     }
+
+    // Also populate cache by LID. Look up Config entries `lid:<id>` whose
+    // value equals one of the delegate phones, and add reverse mapping.
+    // Without this, when a delegate sends a message via WhatsApp's new privacy
+    // protocol, their senderPhone arrives as a LID — we'd miss the match.
+    const lidConfigs = await this.prisma.config.findMany({
+      where: { key: { startsWith: "lid:" } },
+    });
+    for (const c of lidConfigs) {
+      const lid = c.key.slice(4); // strip "lid:"
+      const phone = c.value;
+      const delegate = this.cache.get(phone);
+      if (delegate && !this.cache.has(lid)) {
+        this.cache.set(lid, delegate);
+      }
+    }
+
     this.loaded = true;
   }
 
   /**
-   * Check if a phone number is a registered AND enabled delegate.
+   * Check if a phone number OR LID is a registered AND enabled delegate.
    */
-  isActiveDelegate(phone: string): boolean {
-    const d = this.cache.get(phone);
+  isActiveDelegate(phoneOrLid: string): boolean {
+    const d = this.cache.get(phoneOrLid);
     return Boolean(d && d.enabled);
   }
 
   /**
    * Check if a delegate is allowed to run a specific command.
-   * Returns false if the delegate doesn't exist, is disabled, or
-   * the command is outside their allowed scope.
+   * Accepts phone OR LID — both lookups go to the same delegate record.
    */
-  canRunCommand(phone: string, commandName: string): boolean {
-    const d = this.cache.get(phone);
+  canRunCommand(phoneOrLid: string, commandName: string): boolean {
+    const d = this.cache.get(phoneOrLid);
     if (!d || !d.enabled) return false;
 
     // Explicit allowedCommands: if set and contains "*", allow everything.
