@@ -45,10 +45,11 @@ export class CommandDispatcher {
       return;
     }
 
-    // Reply destination: the chat the command came from. For self-chat this
-    // is your own LID; for DMs with someone else (e.g. Jack) it's their phone.
-    // Either way, sendText to chatId routes the reply back to the same chat.
-    const replyTo = message.chatId || selfPhone;
+    // Reply destination: self-chat → selfPhone (your own number).
+    // Reverted from "any DM" because Evolution v2.2.3 sendText rejects LID
+    // recipients (400 "exists:false") and most non-delegate contacts route
+    // by LID not phone.
+    const replyTo = selfPhone;
 
     // Smart parse: handles both "/status 04/09" and "/status04/09" (no space).
     const withoutSlash = content.slice(1).trim();
