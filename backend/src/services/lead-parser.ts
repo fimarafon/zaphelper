@@ -81,7 +81,10 @@ const CANONICAL_SOURCES: Array<{
   {
     canonical: "Yelp",
     aliases: ["yelp", "yellp", "yepl", "yeelp", "yelp ads"],
-    fuzzyRoots: ["yelp", "yell"],
+    // NOTE: "yell" was removed from fuzzyRoots — it false-positived on
+    // common surnames starting with "Bell-" (Bellamy → bell ~ yell, Lev 1).
+    // "yelp" alone is distinctive enough as a root.
+    fuzzyRoots: ["yelp"],
   },
   {
     canonical: "Google",
