@@ -16,7 +16,11 @@ interface ResolverCache {
   builtAt: number;
 }
 
-const RESOLVER_TTL_MS = 10 * 60 * 1000; // 10 minutes
+// Resolver TTL bumped to 60min — used to be 10min, but rebuilding triggers
+// evolution.fetchAllGroups(true) which causes WhatsApp to fire "syncing"
+// notifications on the user's linked devices. With v2.3.7 webhooks stable,
+// the resolver doesn't need refreshing as often.
+const RESOLVER_TTL_MS = 60 * 60 * 1000; // 60 minutes
 
 /**
  * Background service that periodically pulls new messages from Evolution's
@@ -72,15 +76,19 @@ export class IncrementalSync {
     }, 30_000);
 
     // Recurring every 5 minutes.
+    // Cron interval bumped from 5min → 30min. Rationale: with Evolution v2.3.7
+    // webhooks are stable (no more "Waiting for message" issues) so we don't
+    // need 5-min compensation passes. Less frequent runs = fewer "syncing"
+    // notifications on the user's linked WhatsApp devices.
     this.cronJob = cron.schedule(
-      "*/5 * * * *",
+      "*/30 * * * *",
       () => {
         void this.runSafely("cron");
       },
       { timezone: this.config.TZ },
     );
 
-    this.logger.info("Incremental sync started (every 5 minutes)");
+    this.logger.info("Incremental sync started (every 30 minutes)");
   }
 
   stop(): void {
