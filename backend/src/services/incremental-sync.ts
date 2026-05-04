@@ -76,19 +76,18 @@ export class IncrementalSync {
     }, 30_000);
 
     // Recurring every 5 minutes.
-    // Cron interval bumped from 5min → 30min. Rationale: with Evolution v2.3.7
-    // webhooks are stable (no more "Waiting for message" issues) so we don't
-    // need 5-min compensation passes. Less frequent runs = fewer "syncing"
-    // notifications on the user's linked WhatsApp devices.
-    this.cronJob = cron.schedule(
-      "*/30 * * * *",
-      () => {
-        void this.runSafely("cron");
-      },
-      { timezone: this.config.TZ },
-    );
-
-    this.logger.info("Incremental sync started (every 30 minutes)");
+    // BACKGROUND CRON DISABLED. Rationale:
+    //   1. We only care about the Be Home Leads Scheduled group
+    //   2. Every /statustoday / /statusweek / /statusmonth already triggers
+    //      `syncNowForCommand(chatJid)` which does a scoped sync of that
+    //      exact group before answering — so the data is always fresh AT
+    //      query time
+    //   3. The cron was triggering Evolution.fetchAllGroups(true) which
+    //      pinged WhatsApp servers and made the user's linked devices show
+    //      "syncing" notifications constantly
+    // Re-enable here only if webhooks become unreliable AND on-demand sync
+    // isn't enough.
+    this.logger.info("Background sync cron DISABLED (on-demand only via /status commands)");
   }
 
   stop(): void {
