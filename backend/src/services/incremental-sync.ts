@@ -68,12 +68,41 @@ export class IncrementalSync {
     this.logger = logger.child({ component: "incremental-sync" });
   }
 
+  /** Track last sync runs so we can prove the cron isn't running. */
+  private lastSyncAt: { trigger: string; at: number } | null = null;
+
+  /** Public state snapshot — used by /api/admin/sync-state. */
+  getStateSnapshot(): {
+    cronEnabled: boolean;
+    bootSyncEnabled: boolean;
+    resolverCacheBuiltAt: number | null;
+    resolverCacheAgeSec: number | null;
+    lastSyncAt: { trigger: string; at: number; agoSec: number } | null;
+    running: boolean;
+  } {
+    const now = Date.now();
+    return {
+      cronEnabled: false,
+      bootSyncEnabled: false,
+      resolverCacheBuiltAt: this.resolverCache?.builtAt ?? null,
+      resolverCacheAgeSec: this.resolverCache?.builtAt
+        ? Math.round((now - this.resolverCache.builtAt) / 1000)
+        : null,
+      lastSyncAt: this.lastSyncAt
+        ? {
+            trigger: this.lastSyncAt.trigger,
+            at: this.lastSyncAt.at,
+            agoSec: Math.round((now - this.lastSyncAt.at) / 1000),
+          }
+        : null,
+      running: this.running,
+    };
+  }
+
   async start(): Promise<void> {
-    // Initial run after 30s so the first sync catches anything that
-    // arrived during startup/migration window.
-    setTimeout(() => {
-      void this.runSafely("boot");
-    }, 30_000);
+    // Boot-time sync DISABLED (used to run 30s after start). Container restarts
+    // were triggering an unwanted "syncing" notification on linked WhatsApp
+    // devices. With v2.3.7 webhooks stable, we don't need a startup catchup.
 
     // Recurring every 5 minutes.
     // BACKGROUND CRON DISABLED. Rationale:
@@ -108,6 +137,7 @@ export class IncrementalSync {
     }
     this.running = true;
     const started = Date.now();
+    this.lastSyncAt = { trigger, at: started };
     try {
       // Cron runs walk 3 pages (300 newest records) — enough to catch any
       // gap from webhook drops during a restart, but short enough to

@@ -4,6 +4,7 @@ import type { AppConfig } from "../config.js";
 import type { EvolutionClient } from "../evolution/client.js";
 import { requireAuth } from "../middleware/auth.js";
 import { parseLead } from "../services/lead-parser.js";
+import type { IncrementalSync } from "../services/incremental-sync.js";
 import type { MessageIngest } from "../services/message-ingest.js";
 import type { SelfIdentity } from "../services/self-identity.js";
 import { parseStatusRange, startOfWeekMondayInTz } from "../utils/dates.js";
@@ -14,11 +15,12 @@ export interface InstanceRoutesDeps {
   config: AppConfig;
   selfIdentity: SelfIdentity;
   ingest: MessageIngest;
+  incrementalSync: IncrementalSync;
 }
 
 export const instanceRoutes: FastifyPluginAsync<InstanceRoutesDeps> = async (
   fastify,
-  { prisma, evolution, config, selfIdentity, ingest },
+  { prisma, evolution, config, selfIdentity, ingest, incrementalSync },
 ) => {
   // Current connection status + stored instance row.
   fastify.get("/api/instance/status", async (req, reply) => {
@@ -87,6 +89,17 @@ export const instanceRoutes: FastifyPluginAsync<InstanceRoutesDeps> = async (
       };
     },
   );
+
+  // Snapshot of background sync state. Lets the user prove that the cron is
+  // disabled and see the last time we did any active call to Evolution.
+  fastify.get("/api/admin/sync-state", async (req, reply) => {
+    try {
+      requireAuth(req);
+    } catch {
+      return reply.code(401).send({ error: "Unauthorized" });
+    }
+    return incrementalSync.getStateSnapshot();
+  });
 
   // Manually map a LID → phone for any contact. Used when automatic
   // resolution (profilePicUrl match) fails — e.g. when the contact has no
