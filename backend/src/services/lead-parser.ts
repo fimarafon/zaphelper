@@ -128,6 +128,17 @@ const CANONICAL_SOURCES: Array<{
     // (very common words). "homesh" is distinctive and prefix-stable.
     fuzzyRoots: ["homesh"],
   },
+  {
+    canonical: "Bina",
+    aliases: [
+      // "bina" / "bani" are SHORT (4 chars) and would substring-match common
+      // words ("combination" contains "bina"). Pass-1 substring matching only
+      // fires for aliases ≥5 chars, so these are EXACT-WORD only — safe.
+      "bina", "bani", "binah", "biina", "binaa",
+    ],
+    // No fuzzyRoots: "bina"/"bani" are too short and would prefix-collide with
+    // names. Exact-word match in pass 1 is the only path.
+  },
 ];
 
 /**
@@ -188,7 +199,11 @@ export function detectSource(text: string): string | null {
     for (const alias of aliases) {
       if (!alias.includes(" ")) {
         if (wordSet.has(alias)) return canonical;
-        if (alias.length >= 4 && normalized.includes(alias)) return canonical;
+        // Substring match only for aliases ≥5 chars. Was ≥4, but that let
+        // short aliases like "bina"/"bani" match inside common words
+        // ("combination" contains "bina"). 4-char aliases (angi, yelp, bina,
+        // bani) now require an exact whole-word match via wordSet above.
+        if (alias.length >= 5 && normalized.includes(alias)) return canonical;
       } else {
         if (normalized.includes(alias)) return canonical;
       }
