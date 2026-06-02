@@ -9,6 +9,7 @@ import {
 } from "../evolution/webhook-types.js";
 import type { CommandDispatcher } from "../services/command-dispatcher.js";
 import type { MessageIngest } from "../services/message-ingest.js";
+import type { AutomationEngine } from "../services/automation-engine.js";
 import type { SelfIdentity } from "../services/self-identity.js";
 import type { PrismaClient } from "@prisma/client";
 import type { AppConfig } from "../config.js";
@@ -17,6 +18,7 @@ import { pushWebhookEvent, tagWebhookOutcome } from "../services/webhook-event-l
 export interface WebhookDeps {
   ingest: MessageIngest;
   dispatcher: CommandDispatcher;
+  automationEngine: AutomationEngine;
   selfIdentity: SelfIdentity;
   prisma: PrismaClient;
   config: AppConfig;
@@ -33,7 +35,7 @@ export interface WebhookDeps {
  *   long-running commands like /statusweek.
  */
 export const webhookRoutes: FastifyPluginAsync<WebhookDeps> = async (fastify, deps) => {
-  const { ingest, dispatcher, selfIdentity, prisma, config } = deps;
+  const { ingest, dispatcher, automationEngine, selfIdentity, prisma, config } = deps;
 
   fastify.post("/webhook", async (req, reply) => {
     // Log EVERY inbound event into a ring buffer before any parsing/routing,
@@ -137,9 +139,42 @@ export const webhookRoutes: FastifyPluginAsync<WebhookDeps> = async (fastify, de
       fastify.log.debug("Dedupe: message already stored");
       return { outcome: "duplicate" };
     }
+
+    // Reaction (emoji on another message). The reaction is already stored by
+    // ingest(); here we fire reaction-triggered automations — but ONLY when the
+    // reaction is new/changed (not a re-delivery), and ONLY on this real-time
+    // path (the sync/backfill path never reaches here, so historical reactions
+    // can't trigger actions). Fire-and-forget, like command dispatch.
+    if (result.reaction) {
+      if (result.reaction.changed) {
+        const reactionRow = result.reaction.row;
+        setImmediate(() => {
+          automationEngine.onReaction(reactionRow).catch((err) => {
+            fastify.log.error({ err }, "Automation onReaction failed");
+          });
+        });
+      }
+      return {
+        outcome: "reaction",
+        detail: `emoji=${result.reaction.row.emoji || "(removed)"} changed=${result.reaction.changed}`,
+      };
+    }
+
     if (!result.saved) {
       return { outcome: "not_saved" };
     }
+
+    // Fire event-driven automations (lead_posted / message_posted) for this
+    // saved message — real-time path ONLY (sync/backfill never reaches here, so
+    // historical messages can't trigger actions). Fire-and-forget; trigger
+    // matching (chat scope + filters) decides relevance, and the engine
+    // early-returns when no message-trigger automations exist.
+    const savedMessage = result.saved;
+    setImmediate(() => {
+      automationEngine.onMessage(savedMessage).catch((err) => {
+        fastify.log.error({ err }, "Automation onMessage failed");
+      });
+    });
 
     // Fire-and-forget command dispatch — do NOT await.
     if (result.isSelfCommand) {

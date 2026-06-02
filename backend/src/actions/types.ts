@@ -5,6 +5,38 @@ import type { EvolutionClient } from "../evolution/client.js";
 import type { SelfIdentity } from "../services/self-identity.js";
 
 /**
+ * Data about the event that triggered an action. Present when the action was
+ * fired by an event-driven Automation (reaction/lead trigger) rather than by a
+ * time-based ScheduledTask. Lets actions reference who reacted, which lead,
+ * etc. The AutomationEngine also uses this to substitute {{var}} placeholders
+ * in the action payload (e.g. sendText `text: "Lead {{leadSender}} got {{emoji}}"`).
+ */
+export interface ActionTrigger {
+  /** The triggerType that fired, e.g. "reaction_added" | "lead_posted". */
+  type: string;
+  /** The chat/group where the trigger happened. Used by sendText `to: "group"`. */
+  chatId: string | null;
+  chatName: string | null;
+  /** Present for reaction_* triggers. */
+  reaction?: {
+    emoji: string;
+    removed: boolean;
+    reactorPhone: string | null;
+    reactorName: string | null;
+    targetWaMessageId: string;
+  } | null;
+  /** The relevant message — the lead for *_posted triggers, or the message a
+   *  reaction targeted for reaction_* triggers (when we have it stored). */
+  message?: {
+    waMessageId: string;
+    content: string;
+    senderName: string | null;
+    senderPhone: string | null;
+    source: string | null;
+  } | null;
+}
+
+/**
  * Context passed to every Action when it fires. Contains shared services
  * the action may need (Evolution client, Prisma, config, etc.) plus a
  * logger scoped to the specific task.
@@ -20,6 +52,9 @@ export interface ActionContext {
   /** Optional dispatcher used by the `runCommand` action to re-enter the
    *  command pipeline. Injected lazily to avoid circular imports. */
   runInlineCommand?: (input: string) => Promise<{ success: boolean; reply: string; error?: string }>;
+  /** Present only when the action was fired by an event-driven Automation.
+   *  Undefined for time-based ScheduledTask runs. */
+  trigger?: ActionTrigger;
 }
 
 /**

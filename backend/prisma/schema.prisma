@@ -163,3 +163,95 @@ model ScheduledTask {
   @@index([enabled, nextFireAt])
   @@index([enabled, fireAt])
 }
+
+// A WhatsApp reaction (emoji) on a message. We store the CURRENT reaction
+// state per (targetWaMessageId, reactorPhone) — WhatsApp allows one reaction
+// per person per message, and changing/removing it replaces the previous one.
+// Soft-linked to Message.waMessageId via targetWaMessageId (no hard FK, in
+// keeping with the project's flat-table philosophy).
+model Reaction {
+  id                String   @id @default(cuid())
+  targetWaMessageId String                       // reactionMessage.key.id — the message reacted to
+  reactionEventId   String?                      // the reaction event's own key.id (audit / dedupe)
+  chatId            String                       // remoteJid stripped of @suffix
+  chatName          String?
+  reactorPhone      String?                      // resolved phone digits (NOT LID)
+  reactorName       String?                      // resolved human name
+  emoji             String                       // "✅" / "👍" / "❌"; "" when the reaction was removed
+  removed           Boolean  @default(false)     // true when the person removed their reaction
+  timestamp         DateTime                     // reaction event time
+  rawEvent          Json                         // full Baileys/Evolution payload, for debugging / re-parsing
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  @@unique([targetWaMessageId, reactorPhone])    // one current reaction per person per message
+  @@index([targetWaMessageId])
+  @@index([chatId, timestamp])
+  @@index([emoji])
+}
+
+// A composable, event-driven automation:
+//   scope(group) -> TRIGGER -> (optional delay) -> CONDITIONS -> ACTION
+//
+// The reaction-/event-triggered counterpart to the time-triggered
+// ScheduledTask. triggerType/conditions are open strings + JSON validated
+// against the trigger/condition registries; actionType/actionPayload are
+// validated against the same ActionRegistry as ScheduledTask. New
+// triggers/conditions/actions are drop-in primitives — no schema change.
+model Automation {
+  id            String   @id @default(cuid())
+  name          String
+  enabled       Boolean  @default(true)
+
+  // Scope: which chat/group this watches. null = any chat.
+  chatId        String?
+
+  // TRIGGER — what event starts the automation.
+  //   "lead_posted" | "message_posted" | "reaction_added" | "reaction_removed"
+  triggerType   String
+  // Trigger filters, type-specific: { source?, emoji?, reactorPhone?, fromPhone? }
+  triggerConfig Json     @default("{}")
+
+  // Optional wait (seconds) before evaluating conditions + running the action.
+  // Backed by PendingAutomation so it survives restarts. 0 = immediate.
+  delaySeconds  Int      @default(0)
+
+  // Conditions evaluated at action time (after the delay), against live DB
+  // state. Array of { type, ... } e.g. [{ "type": "no_reaction", "emoji": "👍" }].
+  conditions    Json     @default("[]")
+
+  // Action to run when the trigger fires and conditions pass (ActionRegistry).
+  actionType    String                          // "sendText" | "runCommand" | "webhook" | "sendVoice"
+  actionPayload Json
+
+  lastFiredAt   DateTime?
+  lastError     String?
+  lastResult    String?                          // truncated last action output
+  runCount      Int      @default(0)
+  failureCount  Int      @default(0)             // consecutive failures; reset on success
+
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@index([enabled, triggerType])
+  @@index([enabled, chatId])
+}
+
+// A deferred automation evaluation — created when an Automation with
+// delaySeconds > 0 is triggered. The PendingAutomationRunner fires it at
+// fireAt, evaluates the automation's conditions against current state, and
+// runs the action. Persisted so a "wait 2 minutes then check" survives a
+// container restart (recovered on boot, like ScheduledTask).
+model PendingAutomation {
+  id                String   @id @default(cuid())
+  automationId      String
+  targetWaMessageId String?                      // the message/lead that triggered it (for condition checks)
+  chatId            String?
+  triggerContext    Json     @default("{}")      // snapshot of trigger data (reactor, source, etc.)
+  fireAt            DateTime
+  status            String   @default("PENDING") // PENDING | DONE | CANCELLED
+  createdAt         DateTime @default(now())
+
+  @@index([status, fireAt])
+  @@index([automationId])
+}

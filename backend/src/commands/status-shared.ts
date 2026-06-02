@@ -160,7 +160,7 @@ export async function buildStatusReply(
     };
   }
 
-  const leads: Array<{ poster: string; parsed: NonNullable<ReturnType<typeof parseLeadWithReason>["lead"]> }> = [];
+  const leads: Array<{ poster: string; waMessageId: string; parsed: NonNullable<ReturnType<typeof parseLeadWithReason>["lead"]> }> = [];
   const skippedByReason: Record<string, number> = {
     too_short: 0,
     no_signal: 0,
@@ -175,7 +175,7 @@ export async function buildStatusReply(
       continue;
     }
     const poster = msg.senderName?.trim() || msg.senderPhone || "Unknown";
-    leads.push({ poster, parsed: result.lead });
+    leads.push({ poster, waMessageId: msg.waMessageId, parsed: result.lead });
   }
 
   const skipped =
@@ -194,6 +194,29 @@ export async function buildStatusReply(
     leads.map((l) => ({ poster: l.poster, parsed: l.parsed })),
   );
 
+  // Reaction summary: count active (non-removed) reactions on the lead messages
+  // in this window, grouped by emoji. Lets the report show e.g. "✅ — 5".
+  let reactionSummary: Array<{ emoji: string; count: number }> = [];
+  try {
+    const leadWaIds = leads.map((l) => l.waMessageId);
+    if (leadWaIds.length > 0) {
+      const grouped = await prisma.reaction.groupBy({
+        by: ["emoji"],
+        where: {
+          targetWaMessageId: { in: leadWaIds },
+          removed: false,
+          emoji: { not: "" },
+        },
+        _count: { _all: true },
+      });
+      reactionSummary = grouped
+        .map((g) => ({ emoji: g.emoji, count: g._count._all }))
+        .sort((a, b) => b.count - a.count);
+    }
+  } catch (err) {
+    logger.debug({ err }, "Reaction summary query failed");
+  }
+
   const reply = formatStatusReply(
     {
       label: window.label,
@@ -204,6 +227,7 @@ export async function buildStatusReply(
       bySource,
       skipped,
       skippedByReason,
+      reactions: reactionSummary,
     },
     shortDate,
   );

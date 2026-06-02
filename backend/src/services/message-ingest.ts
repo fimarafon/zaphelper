@@ -1,4 +1,4 @@
-import { type MessageType, type PrismaClient, Prisma } from "@prisma/client";
+import { type MessageType, type PrismaClient, type Reaction, Prisma } from "@prisma/client";
 import type { Logger } from "pino";
 import type {
   EvolutionMessageBody,
@@ -45,6 +45,23 @@ export interface IngestResult {
   isSelfCommand: boolean;      // fromMe + selfChat + starts with "/"
   isDelegateCommand: boolean;  // !fromMe + DM to me + starts with "/" + sender is active delegate
   delegatePhone: string | null; // phone of the delegate who sent the command (reply target)
+  // Set when the ingested event was a reaction (emoji on another message)
+  // rather than a normal message. `changed` is true when the reaction is new
+  // or differs from what we already had — the webhook route uses this to fire
+  // reaction-triggered automations (real-time path only).
+  reaction?: { changed: boolean; row: Reaction };
+}
+
+/**
+ * LID -> phone -> name resolution maps, built from Evolution group participants
+ * and contacts. Used on the sync/backfill path (ingestRaw, applyReaction) where
+ * the real-time pushName isn't available. Shared shape with IncrementalSync's
+ * resolver cache.
+ */
+export interface NameResolver {
+  chatNameMap: Map<string, string>;
+  lidToPhone: Map<string, string>;
+  phoneToName: Map<string, string>;
 }
 
 /**
@@ -147,6 +164,24 @@ export class MessageIngest {
         "Handled protocolMessage MESSAGE_EDIT during backfill",
       );
       return { saved: false, duplicate: true, updated: true };
+    }
+
+    // Same reaction interception as ingest() — reactions pulled via backfill /
+    // sync are STORED but never fire automations. Only the real-time webhook
+    // path fires rules, so historical reactions can't trigger actions (e.g.
+    // messaging Jack for a reaction from weeks ago).
+    const reactionInSync = detectReaction(record.message);
+    if (reactionInSync) {
+      await this.applyReaction(
+        record as unknown as EvolutionMessagesUpsertData,
+        reactionInSync,
+        resolver,
+      );
+      this.logger.info(
+        { targetWaMessageId: reactionInSync.targetMessageId, eventId: key.id },
+        "Handled reaction during backfill/sync",
+      );
+      return { saved: false, duplicate: true };
     }
 
     // Normalize the message body: Evolution's record.message is the raw Baileys
@@ -306,6 +341,21 @@ export class MessageIngest {
       return { updated: true, inserted: false, notFound: false };
     }
 
+    // Some Evolution builds may deliver a reaction as a messages.update rather
+    // than messages.upsert. Catch it here too (no-op for normal edits). Note:
+    // applyUpdate is NOT the real-time reaction path used to fire automations —
+    // only routes/webhook.ts MESSAGES_UPSERT fires rules — so a reaction seen
+    // here is stored but never triggers an action.
+    const reactionAsUpdate = detectReaction(data.message);
+    if (reactionAsUpdate) {
+      await this.applyReaction(data, reactionAsUpdate);
+      this.logger.info(
+        { targetWaMessageId: reactionAsUpdate.targetMessageId, updateEventId: key.id },
+        "Handled reaction arriving via messages.update",
+      );
+      return { updated: true, inserted: false, notFound: false };
+    }
+
     const { content, messageType } = extractContent(data.message ?? {});
 
     // Some Evolution builds send updates with an empty message payload
@@ -397,6 +447,122 @@ export class MessageIngest {
     }
   }
 
+  /**
+   * Store a WhatsApp reaction (emoji on another message). We keep the CURRENT
+   * reaction state per (targetWaMessageId, reactorPhone) — WhatsApp allows one
+   * reaction per person per message, and changing/removing it replaces the
+   * previous one. Reactions never create a row in the Message table.
+   *
+   * Returns `changed` so the caller can decide whether to fire automations:
+   * `changed` is true when the reaction is new OR differs from what we already
+   * stored (emoji changed, or added/removed). The webhook (real-time) path uses
+   * this to trigger automations; the sync/backfill path stores but never fires.
+   *
+   * `resolver` (sync/backfill only) maps LID -> phone and phone -> name for
+   * historical events. On the real-time path it's omitted and we use the
+   * in-memory nameCache + the event's pushName (which is the reactor's name,
+   * since the reaction event is sent BY the reactor).
+   */
+  async applyReaction(
+    data: EvolutionMessagesUpsertData,
+    det: ReactionDetection,
+    resolver?: NameResolver,
+  ): Promise<{ changed: boolean; row: Reaction }> {
+    await this.ensureNameCache();
+
+    const key = data.key;
+    const remoteJid = key.remoteJid;
+    const isGroup = isGroupJid(remoteJid);
+    const chatId = jidToChatId(remoteJid);
+    const chatName =
+      resolver?.chatNameMap.get(remoteJid) ?? resolveChatName(data, isGroup);
+
+    // Who reacted. In a group the reactor is key.participant (often a LID); in
+    // a DM it's key.remoteJid. Resolve LID -> phone -> name exactly like sender
+    // resolution for normal messages, so "Filipe reacted" shows a real name.
+    const reactorJidRaw = isGroup ? key.participant : remoteJid;
+    let reactorPhone: string | null = null;
+    let reactorName: string | null = null;
+    if (reactorJidRaw) {
+      const resolvedPhoneJid = resolver?.lidToPhone.get(reactorJidRaw) ?? reactorJidRaw;
+      reactorPhone = jidToChatId(resolvedPhoneJid);
+      if (reactorPhone) {
+        const manualName = this.nameCache.get(reactorPhone);
+        if (manualName) reactorName = manualName;
+      }
+      if (!reactorName) {
+        const nameFromContacts = resolver?.phoneToName.get(resolvedPhoneJid);
+        if (nameFromContacts) {
+          reactorName = nameFromContacts;
+        } else if (data.pushName && !/^\d+$/.test(data.pushName)) {
+          reactorName = data.pushName;
+        }
+      }
+    }
+
+    const timestamp = resolveTimestamp(data.messageTimestamp);
+    const reactionEventId = typeof key.id === "string" ? key.id : null;
+    const rawEvent = data as unknown as Prisma.InputJsonValue;
+
+    // Find any existing reaction by this person on this message. When the
+    // reactor couldn't be resolved to a phone (null), fall back to the reaction
+    // event id so a re-ingested event doesn't create a duplicate row.
+    const existing = reactorPhone
+      ? await this.prisma.reaction.findUnique({
+          where: {
+            targetWaMessageId_reactorPhone: {
+              targetWaMessageId: det.targetMessageId,
+              reactorPhone,
+            },
+          },
+        })
+      : reactionEventId
+        ? await this.prisma.reaction.findFirst({
+            where: { targetWaMessageId: det.targetMessageId, reactionEventId },
+          })
+        : null;
+
+    const changed =
+      !existing || existing.emoji !== det.emoji || existing.removed !== det.removed;
+
+    if (existing) {
+      if (!changed) {
+        // Same reaction already stored (e.g. webhook + sync both saw it).
+        return { changed: false, row: existing };
+      }
+      const row = await this.prisma.reaction.update({
+        where: { id: existing.id },
+        data: {
+          emoji: det.emoji,
+          removed: det.removed,
+          reactionEventId,
+          timestamp,
+          chatName,
+          // Keep a previously-resolved name if this event didn't resolve one.
+          reactorName: reactorName ?? existing.reactorName,
+          rawEvent,
+        },
+      });
+      return { changed: true, row };
+    }
+
+    const row = await this.prisma.reaction.create({
+      data: {
+        targetWaMessageId: det.targetMessageId,
+        reactionEventId,
+        chatId,
+        chatName,
+        reactorPhone,
+        reactorName,
+        emoji: det.emoji,
+        removed: det.removed,
+        timestamp,
+        rawEvent,
+      },
+    });
+    return { changed: true, row };
+  }
+
   async ingest(data: EvolutionMessagesUpsertData): Promise<IngestResult> {
     await this.ensureNameCache();
 
@@ -449,6 +615,28 @@ export class MessageIngest {
         "Handled protocolMessage MESSAGE_EDIT",
       );
       return { saved: null, duplicate: false, isSelfCommand: false, isDelegateCommand: false, delegatePhone: null };
+    }
+
+    // Intercept reactions (emoji on another message). Baileys/Evolution deliver
+    // these as a messages.upsert with a reactionMessage body. We store them in
+    // the Reaction table (NOT as a Message row) and report `changed` back so the
+    // webhook route can fire reaction-triggered automations. For normal messages
+    // detectReaction returns null and this is a no-op.
+    const reaction = detectReaction(data.message);
+    if (reaction) {
+      const applied = await this.applyReaction(data, reaction);
+      this.logger.info(
+        { targetWaMessageId: reaction.targetMessageId, emoji: reaction.emoji, removed: reaction.removed, changed: applied.changed },
+        "Handled reaction",
+      );
+      return {
+        saved: null,
+        duplicate: false,
+        isSelfCommand: false,
+        isDelegateCommand: false,
+        delegatePhone: null,
+        reaction: applied,
+      };
     }
 
     const remoteJid = key.remoteJid;
@@ -730,6 +918,44 @@ export function detectEdit(body: unknown): EditDetection | null {
     editedFromMe: typeof key.fromMe === "boolean" ? key.fromMe : undefined,
     editedRemoteJid:
       typeof key.remoteJid === "string" ? key.remoteJid : undefined,
+  };
+}
+
+/**
+ * Detects a reaction (emoji on another message). Baileys/Evolution deliver a
+ * reaction as a messages.upsert whose message body is a `reactionMessage`:
+ *
+ *   {
+ *     reactionMessage: {
+ *       key:  { id: <targetMessageId>, remoteJid, fromMe },  // the message reacted to
+ *       text: "✅",            // the emoji; "" (empty) when the reaction is REMOVED
+ *       senderTimestampMs: ...
+ *     }
+ *   }
+ *
+ * The reactor's identity lives on the OUTER event key (key.participant in a
+ * group), so it's resolved by applyReaction — NOT here. detectReaction only
+ * pulls the target message id + emoji. Returns null for any non-reaction body,
+ * so it's a safe no-op on the normal message path.
+ */
+export interface ReactionDetection {
+  targetMessageId: string;
+  emoji: string; // "" when the reaction was removed
+  removed: boolean;
+}
+
+export function detectReaction(body: unknown): ReactionDetection | null {
+  if (!body || typeof body !== "object") return null;
+  const rm = (body as { reactionMessage?: unknown }).reactionMessage;
+  if (!rm || typeof rm !== "object") return null;
+  const key = (rm as { key?: Record<string, unknown> }).key;
+  if (!key || typeof key.id !== "string") return null;
+  const textRaw = (rm as { text?: unknown }).text;
+  const emoji = typeof textRaw === "string" ? textRaw : "";
+  return {
+    targetMessageId: key.id,
+    emoji,
+    removed: emoji.length === 0,
   };
 }
 

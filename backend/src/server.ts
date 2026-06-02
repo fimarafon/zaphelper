@@ -12,6 +12,7 @@ import { authRoutes } from "./routes/auth.js";
 import { commandRoutes } from "./routes/commands.js";
 import { delegatesRoutes } from "./routes/delegates.js";
 import { instanceRoutes } from "./routes/instance.js";
+import { automationsRoutes } from "./routes/automations.js";
 import { messagesRoutes } from "./routes/messages.js";
 import { remindersRoutes } from "./routes/reminders.js";
 import { schedulesRoutes } from "./routes/schedules.js";
@@ -19,7 +20,10 @@ import { webhookRoutes } from "./routes/webhook.js";
 import { CommandDispatcher } from "./services/command-dispatcher.js";
 import { DelegateService } from "./services/delegate-service.js";
 import { IncrementalSync } from "./services/incremental-sync.js";
+import { AutomationEngine } from "./services/automation-engine.js";
+import { AutomationService } from "./services/automation-service.js";
 import { MessageIngest } from "./services/message-ingest.js";
+import { PendingAutomationRunner } from "./services/pending-automation-runner.js";
 import { Scheduler } from "./services/scheduler.js";
 import { ScheduledTaskRunner } from "./services/scheduled-task-runner.js";
 import { ScheduledTaskService } from "./services/scheduled-task-service.js";
@@ -61,6 +65,23 @@ async function bootstrap() {
   );
   const taskService = new ScheduledTaskService(prisma, taskRunner, actionRegistry);
 
+  // Composable automation engine — the event-driven counterpart to the cron
+  // ScheduledTaskRunner. Reuses the same ActionRegistry, so automations can run
+  // any action (sendText, runCommand, webhook, sendVoice). Invoked only from the
+  // real-time webhook path (never sync/backfill). The PendingAutomationRunner
+  // fires delayed automations (e.g. "wait 2 min, then check").
+  const automationEngine = new AutomationEngine(
+    prisma,
+    evolution,
+    selfIdentity,
+    config,
+    actionRegistry,
+    logger,
+  );
+  const pendingRunner = new PendingAutomationRunner(prisma, automationEngine, config, logger);
+  automationEngine.schedulePending = (p) => pendingRunner.register(p);
+  const automationService = new AutomationService(prisma, actionRegistry, automationEngine);
+
   // Delegate service — manages who can run commands by messaging the owner.
   const delegateService = new DelegateService(prisma);
 
@@ -96,11 +117,14 @@ async function bootstrap() {
 
   // Wire the dispatcher back into the task runner so runCommand actions work.
   taskRunner.runInlineCommand = (input: string) => dispatcher.runInline(input);
+  // Same for the automation engine (so automations can use runCommand actions).
+  automationEngine.runInlineCommand = (input: string) => dispatcher.runInline(input);
 
   // --- Init async state before taking traffic ---
   await selfIdentity.init();
   await scheduler.start();
   await taskRunner.start();
+  await pendingRunner.start();
   await incrementalSync.start();
 
   // --- Fastify app ---
@@ -209,10 +233,11 @@ async function bootstrap() {
       });
   });
 
-  await app.register(webhookRoutes, { ingest, dispatcher, selfIdentity, prisma, config });
+  await app.register(webhookRoutes, { ingest, dispatcher, automationEngine, selfIdentity, prisma, config });
   await app.register(authRoutes, { config });
   await app.register(instanceRoutes, { prisma, evolution, config, selfIdentity, ingest, incrementalSync });
   await app.register(messagesRoutes, { prisma });
+  await app.register(automationsRoutes, { prisma, automationService, actionRegistry, evolution, ingest });
   await app.register(commandRoutes, { prisma, registry, dispatcher });
   await app.register(remindersRoutes, { prisma, scheduler });
   await app.register(schedulesRoutes, { taskService, actionRegistry });
@@ -254,6 +279,7 @@ async function bootstrap() {
       // 2) Stop background services.
       await scheduler.stop();
       await taskRunner.stop();
+      await pendingRunner.stop();
       incrementalSync.stop();
       logger.info("Background services stopped");
 

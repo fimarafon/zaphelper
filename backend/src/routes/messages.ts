@@ -72,6 +72,31 @@ export const messagesRoutes: FastifyPluginAsync<MessagesRoutesDeps> = async (
       const items = hasMore ? messages.slice(0, limit) : messages;
       const nextCursor = hasMore ? (items[items.length - 1]?.id ?? null) : null;
 
+      // Attach active (non-removed) reactions per message. Reactions are
+      // soft-linked by targetWaMessageId == Message.waMessageId.
+      const waIds = items.map((m) => m.waMessageId);
+      const reactionRows = waIds.length
+        ? await prisma.reaction.findMany({
+            where: { targetWaMessageId: { in: waIds }, removed: false },
+            orderBy: { timestamp: "asc" },
+            select: {
+              targetWaMessageId: true,
+              emoji: true,
+              reactorName: true,
+              reactorPhone: true,
+            },
+          })
+        : [];
+      const reactionsByTarget = new Map<
+        string,
+        Array<{ emoji: string; reactorName: string | null; reactorPhone: string | null }>
+      >();
+      for (const r of reactionRows) {
+        const list = reactionsByTarget.get(r.targetWaMessageId) ?? [];
+        list.push({ emoji: r.emoji, reactorName: r.reactorName, reactorPhone: r.reactorPhone });
+        reactionsByTarget.set(r.targetWaMessageId, list);
+      }
+
       return {
         items: items.map((m) => ({
           id: m.id,
@@ -85,6 +110,7 @@ export const messagesRoutes: FastifyPluginAsync<MessagesRoutesDeps> = async (
           isFromMe: m.isFromMe,
           isSelfChat: m.isSelfChat,
           timestamp: m.timestamp,
+          reactions: reactionsByTarget.get(m.waMessageId) ?? [],
         })),
         nextCursor,
       };

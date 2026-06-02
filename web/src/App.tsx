@@ -1,11 +1,13 @@
 import { Navigate, Route, Routes } from "react-router-dom";
 import { useMe } from "./api/hooks";
 import { Layout } from "./components/Layout";
+import { Automacoes } from "./pages/Automacoes";
 import { Commands } from "./pages/Commands";
 import { Dashboard } from "./pages/Dashboard";
 import { Delegates } from "./pages/Delegates";
 import { Login } from "./pages/Login";
 import { Messages } from "./pages/Messages";
+import { Pessoas } from "./pages/Pessoas";
 import { Reminders } from "./pages/Reminders";
 import { Schedules } from "./pages/Schedules";
 
@@ -36,6 +38,8 @@ export function App() {
         <Route path="/commands" element={<Commands />} />
         <Route path="/reminders" element={<Reminders />} />
         <Route path="/schedules" element={<Schedules />} />
+        <Route path="/automacoes" element={<Automacoes />} />
+        <Route path="/pessoas" element={<Pessoas />} />
         <Route path="/delegates" element={<Delegates />} />
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />

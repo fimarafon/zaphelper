@@ -143,6 +143,19 @@ export function Messages() {
                       <div className="line-clamp-3 whitespace-pre-wrap text-slate-800">
                         {m.content}
                       </div>
+                      {m.reactions && m.reactions.length > 0 && (
+                        <div className="mt-1 flex flex-wrap gap-1">
+                          {m.reactions.map((r, i) => (
+                            <span
+                              key={i}
+                              className="badge bg-amber-50 text-amber-700"
+                              title={r.reactorName ?? r.reactorPhone ?? ""}
+                            >
+                              {r.emoji} {r.reactorName ?? r.reactorPhone ?? "?"}
+                            </span>
+                          ))}
+                        </div>
+                      )}
                     </td>
                     <td className="whitespace-nowrap text-right">
                       {!isExcluded && (

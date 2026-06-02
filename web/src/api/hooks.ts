@@ -20,6 +20,12 @@ export interface QrCode {
   pairingCode: string | null;
 }
 
+export interface MessageReaction {
+  emoji: string;
+  reactorName: string | null;
+  reactorPhone: string | null;
+}
+
 export interface MessageRow {
   id: string;
   chatId: string;
@@ -32,6 +38,7 @@ export interface MessageRow {
   isFromMe: boolean;
   isSelfChat: boolean;
   timestamp: string;
+  reactions?: MessageReaction[];
 }
 
 export interface CommandLogRow {
@@ -318,6 +325,142 @@ export function useDeleteSchedule() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["schedules"] });
     },
+  });
+}
+
+// ---- Automations (composable event-driven engine) ----
+
+export interface Automation {
+  id: string;
+  name: string;
+  enabled: boolean;
+  chatId: string | null;
+  triggerType: string;
+  triggerConfig: Record<string, unknown>;
+  delaySeconds: number;
+  conditions: unknown[];
+  actionType: string;
+  actionPayload: Record<string, unknown>;
+  lastFiredAt: string | null;
+  lastError: string | null;
+  lastResult: string | null;
+  runCount: number;
+  failureCount: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AutomationPrimitives {
+  triggers: Array<{ type: string; description: string }>;
+  conditions: Array<{ type: string; description: string }>;
+  actions: Array<{ type: string; description: string }>;
+}
+
+export interface CreateAutomationBody {
+  name: string;
+  chatId?: string | null;
+  triggerType: string;
+  triggerConfig?: Record<string, unknown>;
+  delaySeconds?: number;
+  conditions?: unknown[];
+  actionType: string;
+  actionPayload: Record<string, unknown>;
+}
+
+export interface GroupSummary {
+  chatId: string;
+  jid: string;
+  subject: string;
+}
+
+export interface GroupParticipant {
+  phone: string;
+  lid: string;
+  name: string | null;
+  admin: string | null;
+}
+
+export function useAutomations() {
+  return useQuery({
+    queryKey: ["automations"],
+    queryFn: () => api.get<{ items: Automation[] }>("/api/automations"),
+    refetchInterval: 30_000,
+  });
+}
+
+export function useAutomationPrimitives() {
+  return useQuery({
+    queryKey: ["automations", "primitives"],
+    queryFn: () => api.get<AutomationPrimitives>("/api/automations/primitives"),
+    staleTime: 5 * 60_000,
+  });
+}
+
+export function useCreateAutomation() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: CreateAutomationBody) =>
+      api.post<{ ok: true; automation: Automation }>("/api/automations", body),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["automations"] }),
+  });
+}
+
+export function useToggleAutomation() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, enabled }: { id: string; enabled: boolean }) =>
+      api.post<{ ok: true; automation: Automation }>(
+        `/api/automations/${id}/toggle`,
+        { enabled },
+      ),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["automations"] }),
+  });
+}
+
+export function useRunAutomationNow() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => api.post<{ ok: true }>(`/api/automations/${id}/run`),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["automations"] }),
+  });
+}
+
+export function useDeleteAutomation() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => api.del<{ ok: true }>(`/api/automations/${id}`),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["automations"] }),
+  });
+}
+
+// ---- Groups + identity (read groups, map who is who) ----
+
+export function useGroups() {
+  return useQuery({
+    queryKey: ["groups"],
+    queryFn: () => api.get<{ groups: GroupSummary[] }>("/api/groups"),
+    staleTime: 5 * 60_000,
+  });
+}
+
+export function useGroupParticipants(chatId: string | null) {
+  return useQuery({
+    queryKey: ["groups", chatId, "participants"],
+    queryFn: () =>
+      api.get<{ subject: string; participants: GroupParticipant[] }>(
+        `/api/groups/${chatId}/participants`,
+      ),
+    enabled: Boolean(chatId),
+    staleTime: 60_000,
+  });
+}
+
+export function useSetNameMapping() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (mapping: Record<string, string>) =>
+      api.post<{ ok: true }>("/api/instance/name-mapping", { mapping }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["groups"] }),
   });
 }
 

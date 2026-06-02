@@ -34,6 +34,25 @@ const messageBodySchema = z
     stickerMessage: z.object({}).passthrough().optional(),
     contactMessage: z.object({ displayName: z.string().optional() }).passthrough().optional(),
     locationMessage: z.object({}).passthrough().optional(),
+    // A reaction (emoji) on another message. `text` is the emoji ("✅"/"👍"/"❌");
+    // an empty string means the reaction was removed. `key.id` points at the
+    // message being reacted to. Handled by detectReaction()/applyReaction() in
+    // message-ingest.ts BEFORE extractContent, so reactions never become rows
+    // in the Message table.
+    reactionMessage: z
+      .object({
+        text: z.string().optional(),
+        key: z
+          .object({
+            id: z.string().optional(),
+            remoteJid: z.string().optional(),
+            fromMe: z.boolean().optional(),
+          })
+          .passthrough()
+          .optional(),
+      })
+      .passthrough()
+      .optional(),
   })
   .passthrough();
 

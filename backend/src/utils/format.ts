@@ -9,6 +9,7 @@ export interface LeadGroup {
   bySource: Array<{ source: string; count: number }>;
   skipped: number;                       // messages we couldn't parse as leads
   skippedByReason?: Record<string, number>; // breakdown: too_short, no_signal, empty
+  reactions?: Array<{ emoji: string; count: number }>; // emoji counts on leads in window
 }
 
 /**
@@ -46,6 +47,14 @@ export function formatStatusReply(group: LeadGroup, shortDate: string): string {
   lines.push("*By source:*");
   for (const s of group.bySource) {
     lines.push(`• ${s.source} — ${s.count}`);
+  }
+
+  if (group.reactions && group.reactions.length > 0) {
+    lines.push("");
+    lines.push("*Reactions:*");
+    for (const r of group.reactions) {
+      lines.push(`• ${r.emoji} — ${r.count}`);
+    }
   }
 
   if (group.skipped > 0) {

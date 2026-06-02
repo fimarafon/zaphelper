@@ -166,6 +166,24 @@ export class EvolutionClient {
     );
   }
 
+  /**
+   * Send a text message to a raw chat JID — used for GROUPS (e.g.
+   * "120363...@g.us"). Unlike sendText(), this does NOT strip the JID with
+   * cleanPhone (which would turn a group JID into bare digits and send to a
+   * non-existent DM). Evolution's sendText accepts a full group JID in `number`.
+   */
+  async sendToChat(jid: string, text: string): Promise<SendResponse> {
+    const body: SendTextBody = {
+      number: jid.includes("@") ? jid : `${jid}@g.us`,
+      text,
+    };
+    return this.request<SendResponse>(
+      "POST",
+      `/message/sendText/${encodeURIComponent(this.instanceName)}`,
+      body,
+    );
+  }
+
   async sendMedia(
     phone: string,
     mediaUrl: string,
