@@ -206,6 +206,44 @@ export const messagesRoutes: FastifyPluginAsync<MessagesRoutesDeps> = async (
     };
   });
 
+  // Fetch a single message including the rawMessage payload. Used to
+  // recover the original content of a deleted message — applyDelete
+  // overwrites content="[deleted]" but preserves the original webhook
+  // payload (with the conversation text) inside rawMessage. This endpoint
+  // lets the admin see what was sent before the delete.
+  fastify.get<{ Params: { id: string } }>(
+    "/api/admin/raw-message/:id",
+    async (req, reply) => {
+      try {
+        requireAuth(req);
+      } catch {
+        return reply.code(401).send({ error: "Unauthorized" });
+      }
+      const row = await prisma.message.findUnique({
+        where: { id: req.params.id },
+      });
+      if (!row) return reply.code(404).send({ error: "Not found" });
+      // Pull original conversation text out of rawMessage for convenience.
+      const raw = row.rawMessage as Record<string, unknown> | null;
+      const msg = raw?.message as Record<string, unknown> | undefined;
+      const originalText =
+        (msg?.conversation as string | undefined) ??
+        ((msg?.extendedTextMessage as Record<string, unknown> | undefined)?.text as string | undefined) ??
+        null;
+      return {
+        id: row.id,
+        timestamp: row.timestamp,
+        chatId: row.chatId,
+        senderName: row.senderName,
+        senderPhone: row.senderPhone,
+        currentContent: row.content,
+        currentMessageType: row.messageType,
+        originalText,
+        rawMessage: raw,
+      };
+    },
+  );
+
   // DEBUG: recent raw webhook events from the in-memory ring buffer.
   // Lets us inspect exactly what Evolution sent for delete/edit events.
   fastify.get<{ Querystring: { filter?: string; limit?: string } }>(
